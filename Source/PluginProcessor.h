@@ -91,6 +91,8 @@ public:
     void setMacroName (int m, const juce::String&);
     /** Bumped whenever a name changes, so the editor knows to repaint. */
     std::atomic<int> macroNamesVersion { 0 };
+    /** The torch UI (the panel in the dark, the mouse a flashlight): saved with the session, off by default. */
+    std::atomic<bool> torchOn { false };
 
 private:
     void timerCallback() override;

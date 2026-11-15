@@ -31,6 +31,10 @@ expression routes.
 - **Presets:** click the name in the header for the browser: 96 presets in 11 categories, each with
   character tags and a description. Arrow keys audition, Page Up / Page Down change category.
 - **Size:** drag the violet sigil in the bottom-right corner.
+- **Lights out:** click LIGHTS OUT at the top right and the whole window goes dark; the mouse becomes an
+  old incandescent flashlight. Off by default; the choice is saved with the session.
+
+![The torch: the window in the dark, lit only where the mouse is](docs/images/torch_far.png)
 
 ![Dragging LFO 2 onto the resonator's decay: every destination is ringed](docs/images/mapping.png)
 
@@ -98,7 +102,7 @@ Configure with `-DVESSEL_BUILD_CHECK=ON` to build three tools that are not shipp
 |---|---|
 | `VesselLab [all\|zipper\|toggles\|alias\|phase\|lowend\|res\|lfo\|fm\|truepeak\|cpu\|tables]` | Objective DSP measurements: zipper noise in excess of the static patch, bypass clicks (against the same patch held on), inharmonic (alias) energy per stage, dry/wet phase coherence, low-end mono safety, resonator tuning, decay, stability, the bowl's beat and the gong's bloom, LFO movement options, FM aliasing and click-free index sweeps, inter-sample peaks with and without the true-peak ceiling, per-module CPU. `tables` (not part of `all`, about 20 s) decodes and plays all 379 imported wavetables. |
 | `VesselCheck check [outDir] [names]` | Renders every factory preset (or only the comma-separated `names`) with a phrase that suits its category. Fails a preset on: integrated loudness off −16 LUFS by more than 1 LU, true peak above −0.5 dBTP, any sample over 0 dBFS with velocity, mod wheel and aftertouch all at maximum, velocity / CC1 / aftertouch changing the timbre by less than 1 dB (the largest of three distances on the level-normalised 1/3-octave spectrum: its average shape, how far each band swings over the phrase, and how fast it moves from frame to frame), side energy below 120 Hz less than 30 dB under the programme, an unnamed or unrouted macro, any macro changing the timbre by less than 1 dB or the loudness by more than 6 LU, or all eight macros at full plus every expression source at maximum reaching 0 dBFS. Writes a WAV per preset and the UI PNGs. |
-| `VesselCheck ui [outDir]` | Only the UI PNGs, rendered offscreen from the editor: the five stages, SOURCE with an imported table and the FM operator on, a mapping drag in progress, the LFO, expression and macro decks, and the preset browser. `VesselCheck ui docs/images` refreshes the screenshots in this README. |
+| `VesselCheck ui [outDir]` | Only the UI PNGs, rendered offscreen from the editor: the five stages, SOURCE with an imported table and the FM operator on, a mapping drag in progress, the LFO, expression and macro decks, the preset browser, and the torch (aimed at two points); it also times a software repaint of a moving beam. `VesselCheck ui docs/images` refreshes the screenshots in this README. |
 | `VesselCheck calibrate <bank.xml> [names\|category]` | Sets each preset's `out_gain` (or only those named, or one category's) so it lands on −16 LUFS (BS.1770-4) and rewrites the file. |
 | `VesselCheck audit <bank.xml> <outDir> [names\|category]` | The same gates as `check` on a bank *file*, without a rebuild, for work in progress. Adds the macro columns (`mac-min`, the weakest macro's timbre change; `mac-LU`, the largest loudness change; `mac-SP`, the stress peak) and, per preset, each macro's timbre/loudness change. Adds character columns: `sub` (energy below 100 Hz) and `hf` (above 6 kHz), both relative to the whole; `width` (side over mid above 300 Hz); `tail` (the last second against the loudest); and `PLR` (true peak over loudness). Writes a WAV per preset and `sheet.png`, a labelled contact sheet of spectrograms with level and width traces. |
 | `HostProbe path/to/VESSEL.vst3 ["program"]` | Loads the built VST3 the way a host does: scan, instantiate, render with MIDI, state round-trip, programs, editor. With a program name it also prints a render signature for that program (deterministic), for example to A/B a bundle with and without its `Resources/Wavetables`. |
@@ -165,6 +169,8 @@ The SOURCE stage has six columns: Sub, Wavetable, Drone, Dust, Grain and FM. The
 The SHAPE stage holds the ladders, the follower, unmask, the formant filter and the resonator. The resonator column has its model selector, nine controls (tune, decay, damper, bright, stiffness, position, strike, input, mix) and a partials display: the current model's overtones on a log-frequency ruler, each one as tall as it rings long.
 
 Double-click any control to type a value. Option-click resets it. Drag in the LFO canvas to draw when the shape is set to Drawn.
+
+**The torch.** With LIGHTS OUT on (the button at the top right, which always stays visible), a layer above every control (`ui/Torch.cpp`) holds the window in cool blue-black darkness and the mouse becomes a hand-held light. The light falls at full brightness on whatever it touches. The beam is an old incandescent torch: a yellowed amber wash with the bulb's faint shadow at its heart, the bright reflector rings of a cheap reflector, a dimmer spill and a brown-amber fringe where it dies. The light is held below the window, so further up the panel the spot stretches into an ellipse along the line from the hand and dims slightly. The beam trails the mouse with a 28 ms lag, fades up when the mouse enters the window and fades out when it leaves. The layer never takes a click, so every control works in the dark. The setting is saved with the session (off by default) and repaints only the area the beam sweeps.
 
 **Mapping modulation.** Two ways, both one gesture:
 

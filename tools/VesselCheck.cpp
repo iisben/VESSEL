@@ -373,6 +373,7 @@ void snapshots (const juce::File& outDir)
     std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
     auto* ve = dynamic_cast<VesselEditor*> (ed.get());
     auto shot = [&] (const juce::String& name) { savePng (ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f), outDir.getChildFile (name + ".png")); };
+    ve->setTorch (false);   // every page shot fully lit; the torch has its own shots below
     for (int s = 0; s < 5; ++s) { ve->showStage (s); shot ("stage" + juce::String (s)); }
 
     // SOURCE with an imported table playing and the FM operator on
@@ -412,6 +413,28 @@ void snapshots (const juce::File& outDir)
     ve->showBrowser (true);
     shot ("browser");
     ve->showBrowser (false);
+
+    // the torch: the panel in the dark, the beam low on the SHAPE stage and then far up on the header and SOURCE
+    ve->showStage (2);
+    ve->setTorch (true);
+    ve->aimTorch (juce::Point<float> { 600.0f, 470.0f });
+    shot ("torch");
+    ve->aimTorch (juce::Point<float> { 330.0f, 150.0f });
+    shot ("torch_far");
+    {   // the cost of a moving beam: each frame repaints the union of the old and new beam areas
+        const int n = 40;
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int i = 0; i < n; ++i)
+        {
+            const juce::Point<float> p { 300.0f + 15.0f * (float) i, 300.0f + 4.0f * (float) i };
+            ve->aimTorch (p);
+            const auto r = juce::Rectangle<float> (p.x - 300.0f, p.y - 250.0f, 600.0f, 500.0f).getIntersection (ed->getLocalBounds().toFloat()).toNearestInt();
+            (void) ed->createComponentSnapshot (r, true, 1.0f);
+        }
+        std::cout << "torch: software repaint of a moving beam area " << juce::String ((juce::Time::getMillisecondCounterHiRes() - t0) / n, 2) << " ms per frame" << std::endl;
+    }
+    ve->aimTorch (std::nullopt);
+    ve->setTorch (false);
 
     // the largest category, where the grid switches to four columns
     const auto& all = PresetBank::factory().all();
