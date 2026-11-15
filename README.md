@@ -1,15 +1,92 @@
 # VESSEL
 
-by iisben. Sub-bass instrument and multi-effect for dark cinematic, IDM and witch house. VST3, AU and Standalone. JUCE 8.0.9 (also targets 9.x), CMake, C++20.
+A dark polyphonic synth and multi-effect for cinematic, IDM and witch house. A phase-locked sub stack,
+379 wavetables, an FM operator and a physical-model resonator feed five stages of processing (Source,
+Ruin, Shape, Space, Pressure) that take a sound from clean sub to broken tape, black-hole reverb and a
+true-peak ceiling. Eight named macros, three warped LFOs and full expression on every preset.
+
+VST3, AU and Standalone on macOS (Universal: Apple Silicon and Intel). Built with JUCE 8, by iisben.
+
+![VESSEL, the SOURCE stage with an imported table and the FM operator](docs/images/stage0_fm.png)
+
+| II · Ruin | III · Shape |
+|---|---|
+| ![RUIN: tilt, tube, bias, crush, VHS, tape motor](docs/images/stage1.png) | ![SHAPE: ladders, follower, unmask, vox and the gong resonator](docs/images/stage2_gong.png) |
+
+| IV · Space | V · Pressure |
+|---|---|
+| ![SPACE: Z-depth, body, black hole and Haas](docs/images/stage3.png) | ![PRESSURE: multiband up/down and the ducker](docs/images/stage4.png) |
+
+## The interface
+
+One window, read top to bottom like the signal. The five stages are on the left, the selected stage's
+modules fill the centre, and the output section (meters, vectorscope, clipper, exciter, mono below) is
+always on the right. The modulation deck along the bottom holds the macros, the three LFOs and the
+expression routes.
+
+- **Knobs:** drag to turn, double-click to type a value, Option-click to reset. Right-click for every
+  modulation source, with a tick and the depth of any existing route.
+- **Mapping:** drag an LFO tab, an expression header or a macro's diamond onto any control. Every control
+  that can take it shows a dashed ring while you drag; dropping makes the route and brings it forward.
+- **Presets:** click the name in the header for the browser: 96 presets in 11 categories, each with
+  character tags and a description. Arrow keys audition, Page Up / Page Down change category.
+- **Size:** drag the violet sigil in the bottom-right corner.
+
+![Dragging LFO 2 onto the resonator's decay: every destination is ringed](docs/images/mapping.png)
+
+| LFO deck | Expression deck |
+|---|---|
+| ![A warped LFO with its four routes](docs/images/lfo.png) | ![Velocity, mod wheel and aftertouch routes](docs/images/expression.png) |
+
+| Preset browser | Cinematic (28 presets, four columns) |
+|---|---|
+| ![The preset browser](docs/images/browser.png) | ![The Cinematic category](docs/images/browser_cinematic.png) |
+
+## Features
+
+- **Sources:** dual sub-harmonic generators on one master phase, a wavetable oscillator with 379
+  imported CC0 tables (band-limited mips, phase-warp PWM, 4x oversampled voices), a 2-op FM operator, a
+  cinematic drone, dust and vinyl noise, and a granular micro-looper with freeze and synced stutter.
+- **Ruin:** asymmetric tube drive (triode, pentode, bias-starved), analog bias and supply sag, bit
+  crusher, VHS wow, flutter and dropouts, and a MIDI-triggered tape start/stop.
+- **Shape:** dual self-oscillating ZDF ladders, an envelope-follower LPF, spectral unmasking keyed by the
+  sub, a vowel/cello formant filter, and an 8-voice physical-model resonator (string, tube, bell, bar,
+  membrane, plate, bowl, gong).
+- **Space:** Z-axis micro-delay, convolution with procedural or user IRs, the Black Hole FDN reverb with
+  true infinite hold, and a mono-safe Haas widener.
+- **Pressure:** 3-band upward/downward compression, mono below a crossover, a sub-keyed ducker, a 4x
+  oversampled exciter and clipper, and a look-ahead true-peak ceiling.
+- **Modulation:** 8 named, loudness-matched macros with 6 routes each, 3 warped LFOs with 11 shapes
+  (including a drawn one), and velocity, mod wheel and aftertouch routes. All 104 parameters are
+  host-automatable.
+- **Click-free:** every continuous parameter is smoothed and every module switch crossfades over 15 ms.
+- **96 factory presets**, each calibrated to −16 LUFS and ≤ −0.5 dBTP and checked by `VesselCheck`.
+
+## Install (macOS)
+
+Build from source (below), then copy the bundles from `build/Vessel_artefacts/Release/`:
+
+- `VST3/VESSEL.vst3` to `~/Library/Audio/Plug-Ins/VST3/`
+- `AU/VESSEL.component` to `~/Library/Audio/Plug-Ins/Components/`
+
+Rescan plug-ins in your DAW. VESSEL shows up as an instrument by **iisben**. The bundles are ad-hoc
+signed, not notarised, so a copy moved from another Mac may need its quarantine flag cleared:
+
+```bash
+xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/VESSEL.vst3 ~/Library/Audio/Plug-Ins/Components/VESSEL.component
+```
 
 ## Build
 
+Requires CMake 3.22+ and a C++20 compiler (Xcode 15+ or recent Clang). JUCE 8.0.9 (also targets 9.x).
+
 ```bash
-cmake -B build -DVESSEL_JUCE_PATH="$HOME/Desktop/Meridian Synth/plugin/JUCE"
-cmake --build build -j
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+      -DVESSEL_JUCE_PATH="$HOME/Desktop/Meridian Synth/plugin/JUCE"
+cmake --build build --config Release -j
 ```
 
-Leave out `VESSEL_JUCE_PATH` to download JUCE 8.0.9. The plug-ins land in `build/Vessel_artefacts/Release/`.
+Leave out `VESSEL_JUCE_PATH` to download JUCE 8.0.9, and `CMAKE_OSX_ARCHITECTURES` for a native-only build. The plug-ins land in `build/Vessel_artefacts/Release/`.
 
 Validate the AU after installing it to `~/Library/Audio/Plug-Ins/Components`: `auval -v aumu Vssl Vsla`.
 
@@ -21,7 +98,7 @@ Configure with `-DVESSEL_BUILD_CHECK=ON` to build three tools that are not shipp
 |---|---|
 | `VesselLab [all\|zipper\|toggles\|alias\|phase\|lowend\|res\|lfo\|fm\|truepeak\|cpu\|tables]` | Objective DSP measurements: zipper noise in excess of the static patch, bypass clicks (against the same patch held on), inharmonic (alias) energy per stage, dry/wet phase coherence, low-end mono safety, resonator tuning, decay, stability, the bowl's beat and the gong's bloom, LFO movement options, FM aliasing and click-free index sweeps, inter-sample peaks with and without the true-peak ceiling, per-module CPU. `tables` (not part of `all`, about 20 s) decodes and plays all 379 imported wavetables. |
 | `VesselCheck check [outDir] [names]` | Renders every factory preset (or only the comma-separated `names`) with a phrase that suits its category. Fails a preset on: integrated loudness off −16 LUFS by more than 1 LU, true peak above −0.5 dBTP, any sample over 0 dBFS with velocity, mod wheel and aftertouch all at maximum, velocity / CC1 / aftertouch changing the timbre by less than 1 dB (the largest of three distances on the level-normalised 1/3-octave spectrum: its average shape, how far each band swings over the phrase, and how fast it moves from frame to frame), side energy below 120 Hz less than 30 dB under the programme, an unnamed or unrouted macro, any macro changing the timbre by less than 1 dB or the loudness by more than 6 LU, or all eight macros at full plus every expression source at maximum reaching 0 dBFS. Writes a WAV per preset and the UI PNGs. |
-| `VesselCheck ui [outDir]` | Only the UI PNGs, rendered offscreen from the editor: the five stages, SOURCE with an imported table and the FM operator on, a mapping drag in progress, the LFO, expression and macro decks, and the preset browser. |
+| `VesselCheck ui [outDir]` | Only the UI PNGs, rendered offscreen from the editor: the five stages, SOURCE with an imported table and the FM operator on, a mapping drag in progress, the LFO, expression and macro decks, and the preset browser. `VesselCheck ui docs/images` refreshes the screenshots in this README. |
 | `VesselCheck calibrate <bank.xml> [names\|category]` | Sets each preset's `out_gain` (or only those named, or one category's) so it lands on −16 LUFS (BS.1770-4) and rewrites the file. |
 | `VesselCheck audit <bank.xml> <outDir> [names\|category]` | The same gates as `check` on a bank *file*, without a rebuild, for work in progress. Adds the macro columns (`mac-min`, the weakest macro's timbre change; `mac-LU`, the largest loudness change; `mac-SP`, the stress peak) and, per preset, each macro's timbre/loudness change. Adds character columns: `sub` (energy below 100 Hz) and `hf` (above 6 kHz), both relative to the whole; `width` (side over mid above 300 Hz); `tail` (the last second against the loudest); and `PLR` (true peak over loudness). Writes a WAV per preset and `sheet.png`, a labelled contact sheet of spectrograms with level and width traces. |
 | `HostProbe path/to/VESSEL.vst3 ["program"]` | Loads the built VST3 the way a host does: scan, instantiate, render with MIDI, state round-trip, programs, editor. With a program name it also prints a render signature for that program (deterministic), for example to A/B a bundle with and without its `Resources/Wavetables`. |
@@ -190,3 +267,11 @@ The Wavetable column plays the built-in 8-frame analog table ("Vessel") or any o
 Decoding a table (FLAC, then an FFT per frame and mip) takes about 3 ms. The audio thread never waits for it: it keeps playing the previous table until a background thread has swapped the new one in, and decoded tables stay cached (four at most, each freed only two seconds after the audio thread stopped using it).
 
 See `AUDIT.md` for the DSP audit, the measurements before and after, and the known limits.
+
+## Status
+
+Built and tested on macOS (Apple Silicon) as a Universal binary. The AU passes `auval -v aumu Vssl Vsla`,
+`HostProbe` passes its host torture tests (corrupt and empty state, 0/1/13/64/513-sample blocks, NaN/Inf
+input, extreme parameters at 22.05 kHz, multiple instances, rapid editor open/close), `VesselLab tables`
+plays all 379 wavetables, and `VesselCheck check` passes all 96 presets. Windows and Linux builds are not
+tested yet, and the bundles are ad-hoc signed (not Developer ID signed or notarised).
