@@ -821,6 +821,7 @@ void VesselProcessor::getStateInformation (juce::MemoryBlock& dest)
         state.setProperty ("userIR", userIrFile.getFullPathName(), nullptr);
     }
     state.setProperty ("preset", currentPreset.load (std::memory_order_relaxed), nullptr);
+    state.setProperty ("torch", torchOn.load(), nullptr);
     {
         juce::ValueTree names ("MACROS");
         for (int m = 0; m < kNumMacros; ++m) names.setProperty ("m" + juce::String (m + 1), macroName (m), nullptr);
@@ -859,6 +860,7 @@ void VesselProcessor::setStateInformation (const void* data, int size)
     }
     const int maxProg = std::max (0, getNumPrograms() - 1);
     currentPreset.store (juce::jlimit (0, maxProg, (int) state.getProperty ("preset", 0)), std::memory_order_relaxed);
+    torchOn = (bool) state.getProperty ("torch", false);
     {
         const auto names = state.getChildWithName ("MACROS");   // absent in states saved before the macros existed
         for (int m = 0; m < kNumMacros; ++m)

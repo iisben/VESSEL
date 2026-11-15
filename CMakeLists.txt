@@ -59,6 +59,7 @@ target_sources(Vessel PRIVATE
   Source/ui/Reliquary.cpp
   Source/ui/Controls.cpp
   Source/ui/Backdrop.cpp
+  Source/ui/Torch.cpp
   Source/ui/Panels.cpp
   Source/ui/Routing.cpp)
 

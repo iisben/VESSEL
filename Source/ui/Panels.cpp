@@ -839,6 +839,7 @@ void Header::resized()
 void Header::mouseDown (const juce::MouseEvent& e)
 {
     if (presetArea().reduced (26, 0).contains (e.getPosition()) && onBrowse) onBrowse();
+    else if (lightsArea().contains (e.getPosition()) && onTorch) onTorch();
 }
 
 void Header::paint (juce::Graphics& g)
@@ -881,7 +882,23 @@ void Header::paint (juce::Graphics& g)
         { "loop",  t.grainLooping.load(), violet },
         { "motor", t.tapeSpeed.load() < 0.995f, chlorine },
         { "clip",  t.clipCount.load() > 0, blood } };
-    float x = w - 18.0f;
+    // lights out: a real button, far right, and it stays readable in the dark (the torch leaves it unlit)
+    {
+        const bool on = proc.torchOn.load();
+        const juce::Colour amber (0xffffb45a);
+        const auto r = lightsArea().toFloat().reduced (0.5f);
+        g.setColour (on ? amber.withAlpha (0.16f) : frost.withAlpha (0.04f));
+        g.fillRoundedRectangle (r, 5.0f);
+        g.setColour (on ? amber : pewter.withAlpha (0.8f));
+        g.drawRoundedRectangle (r, 5.0f, 1.2f);
+        const juce::Point<float> bulb { r.getX() + 15.0f, r.getCentreY() };   // a torch lens
+        if (on) { g.setColour (amber.withAlpha (0.35f)); g.fillEllipse (juce::Rectangle<float> (14.0f, 14.0f).withCentre (bulb)); }
+        g.setColour (on ? amber : frost.withAlpha (0.85f));
+        g.drawEllipse (juce::Rectangle<float> (9.0f, 9.0f).withCentre (bulb), 1.3f);
+        if (on) g.fillEllipse (juce::Rectangle<float> (4.0f, 4.0f).withCentre (bulb));
+        drawCaps (g, "lights out", r.withTrimmedLeft (26.0f), 9.5f, on ? amber : frost, juce::Justification::centredLeft, 0.22f);
+    }
+    float x = (float) lightsArea().getX() - 20.0f;
     for (int i = 3; i >= 0; --i)
     {
         const auto& l = lamps[i];

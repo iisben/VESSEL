@@ -101,6 +101,9 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
 
     std::function<void()> onBrowse;   // the preset name was clicked
+    std::function<void()> onTorch;    // the Lights Out button was clicked
+    /** The Lights Out button, top right (header coordinates). */
+    juce::Rectangle<int> lightsArea() const { return { getWidth() - 132, getHeight() / 2 - 14, 114, 28 }; }
     void setBrowserOpen (bool o) { browserOpen = o; repaint(); }
 
 private:

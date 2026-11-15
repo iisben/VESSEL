@@ -25,6 +25,10 @@ VesselEditor::VesselEditor (VesselProcessor& p)
     browser->onClose  = [this] { showBrowser (false); };
     browser->onLoaded = [this] { header->repaint(); };
     header->onBrowse  = [this] { showBrowser (! browser->isVisible()); };
+    header->onTorch   = [this] { setTorch (! proc.torchOn.load()); };
+
+    canvas.addAndMakeVisible (torch);   // always on top of every page, the browser included
+    torch.setOn (proc.torchOn.load());
 
     spine->onSelect = [this] (int s) { showStage (s); };
     showStage (0);
@@ -72,6 +76,8 @@ void VesselEditor::resized()
     mod->setBounds (200, 560, 800, kHeight - 560);
     rail->setBounds (1000, 60, kWidth - 1000, kHeight - 60);
     browser->setBounds (0, 60, kWidth, kHeight - 60);
+    torch.setBounds (0, 0, kWidth, kHeight);
+    torch.setClear (header->lightsArea().translated (header->getX(), header->getY()));
 }
 
 void VesselEditor::showBrowser (bool show)
@@ -89,6 +95,13 @@ void VesselEditor::routeChanged (vessel::ui::ModSource src, int slot, vessel::ui
 void VesselEditor::routesCleared (int target)
 {
     mod->showMessage (juce::String (vessel::spec (target).name) + " has no modulation now");
+}
+
+void VesselEditor::setTorch (bool on)
+{
+    proc.torchOn = on;
+    torch.setOn (on);
+    header->repaint();
 }
 
 void VesselEditor::setDropPreview (bool on)
