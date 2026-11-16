@@ -88,6 +88,17 @@ macOS may block a downloaded copy. This clears the quarantine flag:
 xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/VESSEL.vst3 ~/Library/Audio/Plug-Ins/Components/VESSEL.component
 ```
 
+## Installing it (Windows)
+
+Download the `Windows-VST3` zip from [Releases](https://github.com/iisben/VESSEL/releases/latest) and copy the whole
+`VESSEL.vst3` folder into `C:\Program Files\Common Files\VST3\`. Keep the folder intact, because the wavetables
+live inside it. There's also a standalone `VESSEL.exe` in the `Standalone` folder. It isn't code-signed, so
+SmartScreen may warn you the first time ("More info", then "Run anyway").
+
+Every push to `main` also builds the Windows version on GitHub Actions (**Actions → Build (Windows)**). To add it
+to a new release, create the release as a draft, run that workflow with the release's tag, then publish. Published
+releases can't take new files.
+
 ## Building it
 
 You'll need CMake 3.22+ and a C++20 compiler (Xcode 15+ or a recent Clang). It builds against JUCE 8.0.9, and
@@ -292,5 +303,6 @@ For the nitty-gritty of the DSP audit and known limits, see `AUDIT.md`.
 ## Status
 
 VESSEL is built and tested on macOS (Apple Silicon) as a Universal binary. The AU passes Apple's `auval`, the VST3
-survives `HostProbe`'s torture tests, all 379 wavetables play, and all 96 presets pass `VesselCheck`. It hasn't
-been tried on Windows or Linux yet, and the builds aren't signed with a Developer ID or notarised.
+survives `HostProbe`'s torture tests, all 379 wavetables play, and all 96 presets pass `VesselCheck`. The Windows
+VST3 is built on GitHub Actions and passes the same `HostProbe` tests there, but it hasn't been tried in a DAW on
+Windows yet. Linux is untested, and none of the builds are code-signed (no Developer ID or notarisation on macOS).
