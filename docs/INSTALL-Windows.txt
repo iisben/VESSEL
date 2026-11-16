@@ -1,0 +1,20 @@
+VESSEL for Windows (64-bit)
+===========================
+
+VST3
+----
+Copy the whole VESSEL.vst3 folder to:
+
+    C:\Program Files\Common Files\VST3\
+
+Keep the folder intact: the 379 wavetables live inside it, in VESSEL.vst3\Contents\Resources\Wavetables.
+Then rescan plug-ins in your DAW. VESSEL shows up as an instrument by iisben.
+
+Standalone
+----------
+Run Standalone\VESSEL.exe. Keep the Wavetables folder next to it.
+
+Notes
+-----
+The build is not code-signed, so Windows SmartScreen may warn the first time you run the standalone.
+Choose "More info", then "Run anyway".

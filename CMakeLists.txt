@@ -89,6 +89,22 @@ foreach(fmt VST3 AU Standalone)
   endif()
 endforeach()
 
+# juce_add_bundle_resources_directory only works on Apple. On Windows the VST3 binary sits in
+# VESSEL.vst3/Contents/x86_64-win, so the tables go to Contents/Resources/Wavetables (where tablesFolder() looks),
+# and the standalone gets them next to its .exe.
+if(WIN32)
+  if(TARGET Vessel_VST3)
+    add_custom_command(TARGET Vessel_VST3 POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Wavetables" "$<TARGET_FILE_DIR:Vessel_VST3>/../Resources/Wavetables"
+      VERBATIM)
+  endif()
+  if(TARGET Vessel_Standalone)
+    add_custom_command(TARGET Vessel_Standalone POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Wavetables" "$<TARGET_FILE_DIR:Vessel_Standalone>/Wavetables"
+      VERBATIM)
+  endif()
+endif()
+
 # Offline render + UI snapshot harness (not shipped):  cmake -B build -DVESSEL_BUILD_CHECK=ON
 option(VESSEL_BUILD_CHECK "Build the VesselCheck offline test tool" OFF)
 if(VESSEL_BUILD_CHECK)

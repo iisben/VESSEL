@@ -1,0 +1,66 @@
+name: Build (Windows)
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the zip to this release tag (leave empty to only upload an artifact)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (VST3 + Standalone)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DVESSEL_BUILD_CHECK=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4 --target Vessel_VST3 Vessel_Standalone HostProbe
+
+      - name: Host probe
+        shell: pwsh
+        run: |
+          $probe = Get-ChildItem -Recurse -Filter HostProbe.exe build | Select-Object -First 1
+          & $probe.FullName "build/Vessel_artefacts/Release/VST3/VESSEL.vst3"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package
+        id: pkg
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(VESSEL VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          $name = "VESSEL-$version-Windows-VST3"
+          New-Item -ItemType Directory -Force -Path dist/$name | Out-Null
+          Copy-Item -Recurse "build/Vessel_artefacts/Release/VST3/VESSEL.vst3" "dist/$name/"
+          New-Item -ItemType Directory -Force -Path "dist/$name/Standalone" | Out-Null
+          Copy-Item "build/Vessel_artefacts/Release/Standalone/VESSEL.exe" "dist/$name/Standalone/"
+          Copy-Item -Recurse "build/Vessel_artefacts/Release/Standalone/Wavetables" "dist/$name/Standalone/"
+          Copy-Item "docs/INSTALL-Windows.txt" "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          "zip=dist/$name.zip" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release' || inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: gh release upload "$env:TAG" "${{ steps.pkg.outputs.zip }}" --clobber
