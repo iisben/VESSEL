@@ -73,13 +73,16 @@ A few things worth knowing:
 
 ## Installing it (macOS)
 
-Build it first (see below), then copy the bundles out of `build/Vessel_artefacts/Release/`:
+Grab the latest build from [Releases](https://github.com/iisben/VESSEL/releases/latest): there's a zip for the
+VST3 and one for the AU, both Universal (Apple Silicon and Intel). Unzip them and copy:
 
-- `VST3/VESSEL.vst3` goes in `~/Library/Audio/Plug-Ins/VST3/`
-- `AU/VESSEL.component` goes in `~/Library/Audio/Plug-Ins/Components/`
+- `VESSEL.vst3` into `~/Library/Audio/Plug-Ins/VST3/`
+- `VESSEL.component` into `~/Library/Audio/Plug-Ins/Components/`
 
-Rescan in your DAW and VESSEL should show up as an instrument by **iisben**. The builds aren't notarised yet, so if
-you copy them over from another Mac, macOS may block them. This clears the quarantine flag:
+If you'd rather build it yourself (see below), the same bundles land in `build/Vessel_artefacts/Release/VST3` and `AU`.
+
+Rescan in your DAW and VESSEL should show up as an instrument by **iisben**. The builds aren't notarised yet, so
+macOS may block a downloaded copy. This clears the quarantine flag:
 
 ```bash
 xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/VESSEL.vst3 ~/Library/Audio/Plug-Ins/Components/VESSEL.component
