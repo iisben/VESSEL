@@ -9,6 +9,28 @@ side mix-ready, with a tight mono low end and no clipping surprises. There are 3
 physical-model resonator, eight macros on every preset, and velocity, mod wheel and aftertouch that actually
 change the sound.
 
+![VESSEL, the SOURCE stage with an imported table and the FM operator](docs/images/stage0_fm.png)
+
+| II · Ruin | III · Shape |
+|---|---|
+| ![RUIN: tilt, tube, bias, crush, VHS, tape motor](docs/images/stage1.png) | ![SHAPE: ladders, follower, unmask, vox and the gong resonator](docs/images/stage2_gong.png) |
+
+| IV · Space | V · Pressure |
+|---|---|
+| ![SPACE: Z-depth, body, black hole and Haas](docs/images/stage3.png) | ![PRESSURE: multiband up/down and the ducker](docs/images/stage4.png) |
+
+![Lights out: the window in the dark, lit only where the mouse is](docs/images/torch_far.png)
+
+![Dragging LFO 2 onto the resonator's decay: every destination is ringed](docs/images/mapping.png)
+
+| LFO deck | Expression deck |
+|---|---|
+| ![A warped LFO with its four routes](docs/images/lfo.png) | ![Velocity, mod wheel and aftertouch routes](docs/images/expression.png) |
+
+| Preset browser | Cinematic (28 presets, four columns) |
+|---|---|
+| ![The preset browser](docs/images/browser.png) | ![The Cinematic category](docs/images/browser_cinematic.png) |
+
 ## What's inside
 
 - **Sources:** two sub-harmonic generators locked to one phase, so the low end never fights itself. There's a
