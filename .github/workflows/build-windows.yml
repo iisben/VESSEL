@@ -3,12 +3,10 @@ name: Build (Windows)
 on:
   push:
     branches: [main]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Attach the zip to this release tag (leave empty to only upload an artifact)"
+        description: "Attach the zip to this DRAFT release tag (releases are immutable once published); empty = artifact only"
         required: false
 
 permissions:
@@ -58,9 +56,9 @@ jobs:
           if-no-files-found: error
 
       - name: Attach to release
-        if: github.event_name == 'release' || inputs.release_tag != ''
+        if: inputs.release_tag != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          TAG: ${{ inputs.release_tag }}
         run: gh release upload "$env:TAG" "${{ steps.pkg.outputs.zip }}" --clobber
