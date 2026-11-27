@@ -2,14 +2,19 @@ name: Build & Release (macOS Universal, Windows x64, Linux x86_64)
 
 on:
   push:
-    branches: [main, feat/vessel-v2-namm]
+    branches: [main]
     tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional GitHub Release tag to attach built archives to (e.g. v2.0.0)"
+        required: false
+        default: ""
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PLUGINVAL_VERSION: "v1.0.4"
@@ -24,6 +29,12 @@ jobs:
 
       - name: Install Ninja
         run: brew install ninja
+
+      - name: Read Version
+        id: ver
+        run: |
+          VER=$(grep -E '^project\(VESSEL VERSION ' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - name: Configure (Universal arm64;x86_64 Release)
         run: |
@@ -67,23 +78,42 @@ jobs:
           "$PVAL" --strictness-level 5 --validate-in-process --timeout-ms 120000 \
             --validate build/Vessel_artefacts/Release/AU/VESSEL.component
 
-      - name: Package macOS Universal Archive
+      - name: Package macOS Universal Archives (VST3, AU, All-in-One)
         run: |
-          STAGE="dist/macos/VESSEL-II-macOS-Universal"
-          rm -rf "$STAGE" dist/macos/VESSEL-II-macOS-Universal.zip
-          mkdir -p "$STAGE"
-          ditto build/Vessel_artefacts/Release/VST3/VESSEL.vst3 "$STAGE/VESSEL.vst3"
-          ditto build/Vessel_artefacts/Release/AU/VESSEL.component "$STAGE/VESSEL.component"
-          ditto build/Vessel_artefacts/Release/Standalone/VESSEL.app "$STAGE/VESSEL.app"
-          cp docs/INSTALL-macOS.txt "$STAGE/INSTALL-macOS.txt"
-          ditto -c -k --sequesterRsrc --keepParent "$STAGE" dist/macos/VESSEL-II-macOS-Universal.zip
-          rm -rf "$STAGE"
+          V="${{ steps.ver.outputs.version }}"
+          mkdir -p dist/macos
 
-      - name: Upload macOS Universal Artifact
+          S_VST="dist/macos/VESSEL-${V}-macOS-VST3"
+          rm -rf "$S_VST" "dist/macos/VESSEL-${V}-macOS-VST3.zip"
+          mkdir -p "$S_VST"
+          ditto build/Vessel_artefacts/Release/VST3/VESSEL.vst3 "$S_VST/VESSEL.vst3"
+          cp docs/INSTALL-macOS.txt "$S_VST/INSTALL-macOS.txt"
+          ditto -c -k --sequesterRsrc --keepParent "$S_VST" "dist/macos/VESSEL-${V}-macOS-VST3.zip"
+          rm -rf "$S_VST"
+
+          S_AU="dist/macos/VESSEL-${V}-macOS-AU"
+          rm -rf "$S_AU" "dist/macos/VESSEL-${V}-macOS-AU.zip"
+          mkdir -p "$S_AU"
+          ditto build/Vessel_artefacts/Release/AU/VESSEL.component "$S_AU/VESSEL.component"
+          cp docs/INSTALL-macOS.txt "$S_AU/INSTALL-macOS.txt"
+          ditto -c -k --sequesterRsrc --keepParent "$S_AU" "dist/macos/VESSEL-${V}-macOS-AU.zip"
+          rm -rf "$S_AU"
+
+          S_ALL="dist/macos/VESSEL-${V}-macOS-Universal"
+          rm -rf "$S_ALL" "dist/macos/VESSEL-${V}-macOS-Universal.zip"
+          mkdir -p "$S_ALL"
+          ditto build/Vessel_artefacts/Release/VST3/VESSEL.vst3 "$S_ALL/VESSEL.vst3"
+          ditto build/Vessel_artefacts/Release/AU/VESSEL.component "$S_ALL/VESSEL.component"
+          ditto build/Vessel_artefacts/Release/Standalone/VESSEL.app "$S_ALL/VESSEL.app"
+          cp docs/INSTALL-macOS.txt "$S_ALL/INSTALL-macOS.txt"
+          ditto -c -k --sequesterRsrc --keepParent "$S_ALL" "dist/macos/VESSEL-${V}-macOS-Universal.zip"
+          rm -rf "$S_ALL"
+
+      - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: VESSEL-II-macOS-Universal
-          path: dist/macos/VESSEL-II-macOS-Universal.zip
+          name: VESSEL-macOS-Universal
+          path: dist/macos/VESSEL-*.zip
           if-no-files-found: error
 
   windows:
@@ -92,6 +122,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path CMakeLists.txt -Pattern 'project\(VESSEL VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Configure (MSVC x64)
         run: cmake -S . -B build -A x64 -DVESSEL_BUILD_QA=ON
@@ -123,21 +160,22 @@ jobs:
       - name: Package Windows x64 Archive
         shell: pwsh
         run: |
-          $stage = "dist/windows/VESSEL-II-Windows-x64"
+          $v = "${{ steps.ver.outputs.version }}"
+          $stage = "dist/windows/VESSEL-$v-Windows-x64"
           if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
           New-Item -ItemType Directory -Force -Path "$stage/Standalone" | Out-Null
           Copy-Item -Recurse "build/Vessel_artefacts/Release/VST3/VESSEL.vst3" "$stage/"
           Copy-Item "build/Vessel_artefacts/Release/Standalone/VESSEL.exe" "$stage/Standalone/"
           Copy-Item -Recurse "build/Vessel_artefacts/Release/Standalone/Wavetables" "$stage/Standalone/"
           Copy-Item "docs/INSTALL-Windows.txt" "$stage/"
-          Compress-Archive -Path "$stage" -DestinationPath "dist/windows/VESSEL-II-Windows-x64.zip" -Force
+          Compress-Archive -Path "$stage" -DestinationPath "dist/windows/VESSEL-$v-Windows-x64.zip" -Force
           Remove-Item -Recurse -Force $stage
 
       - name: Upload Windows x64 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VESSEL-II-Windows-x64
-          path: dist/windows/VESSEL-II-Windows-x64.zip
+          name: VESSEL-Windows-x64
+          path: dist/windows/VESSEL-*.zip
           if-no-files-found: error
 
   linux:
@@ -147,6 +185,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read Version
+        id: ver
+        run: |
+          VER=$(grep -E '^project\(VESSEL VERSION ' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
       - name: Install JUCE Linux Dependencies
         run: |
           sudo apt-get update
@@ -155,7 +199,8 @@ jobs:
             libasound2-dev libfreetype-dev libfontconfig1-dev \
             libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
             libxinerama-dev libxrandr-dev libxrender-dev \
-            libgl1-mesa-dev libjack-jackd2-dev ladspa-sdk
+            libgl1-mesa-dev libgl1-mesa-dri libglu1-mesa-dev \
+            libjack-jackd2-dev ladspa-sdk
 
       - name: Configure (Linux x86_64 Release)
         run: |
@@ -178,24 +223,49 @@ jobs:
           curl -fSL "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_Linux.zip" -o pluginval.zip
           unzip -q pluginval.zip -d pluginval_bin
           chmod +x pluginval_bin/pluginval
-          xvfb-run -a ./pluginval_bin/pluginval --strictness-level 5 --validate-in-process --timeout-ms 120000 \
+          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1400x900x24" \
+            ./pluginval_bin/pluginval --strictness-level 5 --validate-in-process --timeout-ms 120000 \
             --validate build/Vessel_artefacts/Release/VST3/VESSEL.vst3
 
       - name: Package Linux x86_64 Archive
         run: |
-          STAGE="dist/linux/VESSEL-II-Linux-x86_64"
-          rm -rf "$STAGE" dist/linux/VESSEL-II-Linux-x86_64.tar.gz
+          V="${{ steps.ver.outputs.version }}"
+          STAGE="dist/linux/VESSEL-${V}-Linux-x86_64"
+          rm -rf "$STAGE" "dist/linux/VESSEL-${V}-Linux-x86_64.tar.gz"
           mkdir -p "$STAGE/Standalone"
           cp -r build/Vessel_artefacts/Release/VST3/VESSEL.vst3 "$STAGE/"
           cp build/Vessel_artefacts/Release/Standalone/VESSEL "$STAGE/Standalone/"
           cp -r build/Vessel_artefacts/Release/Standalone/Wavetables "$STAGE/Standalone/"
           cp docs/INSTALL-Linux.txt "$STAGE/INSTALL-Linux.txt"
-          tar -czf dist/linux/VESSEL-II-Linux-x86_64.tar.gz -C dist/linux VESSEL-II-Linux-x86_64
+          tar -czf "dist/linux/VESSEL-${V}-Linux-x86_64.tar.gz" -C dist/linux "VESSEL-${V}-Linux-x86_64"
           rm -rf "$STAGE"
 
       - name: Upload Linux x86_64 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VESSEL-II-Linux-x86_64
-          path: dist/linux/VESSEL-II-Linux-x86_64.tar.gz
+          name: VESSEL-Linux-x86_64
+          path: dist/linux/VESSEL-*.tar.gz
           if-no-files-found: error
+
+  release:
+    name: Attach 3-OS Builds to GitHub Release
+    needs: [macos, windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload Assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          ls -lh release-assets/
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "VESSEL ${TAG#v} (macOS, Windows, Linux)" --generate-notes
+          fi
+          gh release upload "$TAG" release-assets/* --clobber

@@ -1,5 +1,5 @@
-VESSEL for Windows (64-bit)
-===========================
+VESSEL 2.0 for Windows (64-bit)
+===============================
 
 VST3
 ----
@@ -14,7 +14,14 @@ Standalone
 ----------
 Run Standalone\VESSEL.exe. Keep the Wavetables folder next to it.
 
+User Presets & Settings
+-----------------------
+Stored automatically in:
+
+    %APPDATA%\VESSEL_II\
+
 Notes
 -----
-The build is not code-signed, so Windows SmartScreen may warn the first time you run the standalone.
-Choose "More info", then "Run anyway".
+- All 379 CC0 wavetables and 116 factory presets (96 V1 + 20 V2 flagship) are bundled.
+- The build is not code-signed, so Windows SmartScreen may warn on first launch.
+  Choose "More info", then "Run anyway".

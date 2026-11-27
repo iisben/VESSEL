@@ -52,9 +52,11 @@ try {
         }
     }
 
-    Write-Host "==> Packaging dist\windows\VESSEL-II-Windows-x64.zip..." -ForegroundColor Cyan
-    $stage = "dist/windows/VESSEL-II-Windows-x64"
-    $zip = "dist/windows/VESSEL-II-Windows-x64.zip"
+    $verMatch = Select-String -Path CMakeLists.txt -Pattern 'project\(VESSEL VERSION ([0-9.]+)'
+    $ver = $verMatch.Matches[0].Groups[1].Value
+    Write-Host "==> Packaging dist\windows\VESSEL-$ver-Windows-x64.zip..." -ForegroundColor Cyan
+    $stage = "dist/windows/VESSEL-$ver-Windows-x64"
+    $zip = "dist/windows/VESSEL-$ver-Windows-x64.zip"
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     if (Test-Path $zip) { Remove-Item -Force $zip }
     New-Item -ItemType Directory -Force -Path "$stage/Standalone" | Out-Null
