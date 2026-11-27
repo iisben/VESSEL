@@ -1,7 +1,7 @@
 # VESSEL II — Engineering & QA Ledger
 
-- **Current Stage:** `Stage 4: PASS`
-- **Next Stage:** `Stage 5`
+- **Current Stage:** `Stage 5: PASS`
+- **Next Stage:** `Stage 6`
 - **Branch:** `feat/vessel-v2-namm` (initialized from V1.0.1 baseline on `main`; no git remote configured yet)
 - **DSP Core Freeze:** `FROZEN` (after Stage 3B — do not modify frozen DSP math files in Stages 4–7)
 
@@ -178,3 +178,20 @@
   - Stage 4 Control-Plane QA (`7/7 OK`): Hero Macros (`229 -> 1918 / 79 Hz`), XY (`centerDiff=-300.0 dBFS`, `oddRes=-300.0 dBFS`), MPE (`Ch2=523.2 Hz [0.0 ct]` / `Ch3=392.0 Hz [0.1 ct]`, isolated CC74 Slide / Poly AT / Breath / 5 Vel curves), MIDI CC Learn (`CC21->flt_a_cut`, disk round-trip), A/B (`trans2ndDiff=0.0123 <= steady 0.0131`), Undo/Redo (`9000->4000->500->4000->9000`), V2 Preset round-trip & V1->V2 migration (`maxRMSdiff=0.0000 dB`).
   - `HostProbe` on `VESSEL.vst3` = **`PASSED`** (21/21, 2459 exposed params, latency 209 samples).
 - **Stage 4 Status:** `PASS`. **Next:** `Stage 5`.
+
+---
+
+## Stage 5 — NAMM 2027 Brutalist-Industrial UI/UX Overhaul & Visual Self-Inspection
+- **Frozen DSP Audit:** `git diff Source/dsp/` = **0 lines changed** (DSP core strictly untouched).
+- **UI/UX Architecture & Cross-Platform 60 Hz Rendering (12 files + 3 embedded SIL OFL fonts; removed `juce_opengl` & `Backdrop.{h,cpp}`; 0 warnings in `Source/` & `tools/Vessel2*`):**
+  - **Brutalist-Industrial Visual System (`Reliquary.{h,cpp}`, `Resources/Fonts/`):** Strict 8px alignment grid on `1280 x 800` logical canvas (`960x600`..`1920x1200` integer zoom steps); machined obsidian/gunmetal panels with 1px specular bevels, recessed display wells, phosphor-amber value arcs, cryo-cyan live modulation/MPE/XY/spectrum accents, and crimson clip-only indicators; embedded SIL OFL `Space Grotesk` (Bold/Medium) + `JetBrains Mono` (Medium) compiled into `VesselData` for pixel-identical macOS/Windows/Linux typography; pre-rendered 2x Retina `juce::Image` static chassis cache (`renderChassisCache`) with deterministic baked anodized grain + native 60 Hz JUCE `Graphics` overlays (zero OpenGL DAW crashes).
+  - **Interactive Hero Centerpiece (`HeroCenterpiece.{h,cpp}`):** Real-time 60 Hz lock-free `ScopeSpectrumWidget` (`DUAL | SCOPE | SPEC` triggered stereo oscilloscope + 2048-pt Hann log-spectrum + UI-thread sub-120 Hz stereo phase correlation & momentary LUFS-style level) paired with draggable `XySculptorWidget` (glowing motion trail, dynamic X/Y labels, fine drag, double-click center reset, right-click route/MIDI Learn) + `MasterStripWidget`.
+  - **Pro Studio Top Bar, Mod Deck, Browser & Bottom Dock (`Panels.{h,cpp}`, `Controls.{h,cpp}`, `PluginEditor.{h,cpp}`):** Top bar with `VESSEL II` wordmark, Preset Bar (Prev/Next, Star Favorite, Searchable/Categorized/Tagged `PresetBrowser` overlay with Hero Macro preview, inline V2 `SavePresetOverlay`, Init), `A/B` + `A>B`, `Undo/Redo` (`Cmd/Ctrl+Z`), `MPE` badge, `75/100/125/150%` persisted zoom + aspect-locked drag resize (`<userAppData>/VESSEL_II/ui_prefs.xml`), Stereo Peak/LUFS Meter + `SUB<120` Mono-Correlation indicator. Bottom `PerformanceDock`: 4 Hero Macro knobs with dynamic labels/rename/drag-routing/live mod rings + V2 Organic Analog & Procedural Texture bus controls. `ModPanel`: 6 tabs (`LFO 1..3`, 5-source `EXPR` incl. Slide CC74 & Breath CC2, `MACRO 1..8`, `XY`). Tactile controls: hover/drag precision pill readout, double-click default reset, Shift/Cmd/Ctrl fine drag, right-click MIDI Learn & routing.
+- **Mandatory Retina Snapshot Self-Inspection (`tools/Vessel2UiQA.cpp` -> `build/vessel2_qa/ui_snapshots/`):**
+  - Rendered and directly inspected 1x (`1280x800`) and 2x Retina (`2560x1600`) PNGs (`01_main`, `02_browser`, `03_macro_mod`, plus 2x audits of `Ruin/Expr`, `Space/XY`, `Pressure`, and `Save Dialog`; full 1280x800 software snapshot avg `24.39 ms`).
+  - Refined 7 visual details across two render-inspect passes (compact ADSR fader labels eliminating horizontal crowding, exact 7-row browser card height removing bottom row slicing, focus-gated TextEditor outlines, clean inactive Hero Macro arc states, spacious meter dB ticks, Vox F1/F2/F3 formant bars, immediate first-frame LUFS convergence).
+- **Verification (Release `-O3`):**
+  - `Vessel_VST3`, `Vessel_AU`, `Vessel_Standalone`, `Vessel2UiQA`, `Vessel2QA`, `VesselCheck` = **`BUILD_EXIT=0`** (0 warnings in `Source/` & `Vessel2*`).
+  - `Vessel2QA --strict --compare-v1 build/vessel2_qa/v1_preset_frozen_3b.csv --stage4-qa` = **`PASS=9 FAIL=0 PENDING=0`** (`maxRegress=0.022 dB <= 0.05 dB`, `16v` median `12.41%` RT / p95 `13.75%` RT, idle `0.293%` RT).
+  - `HostProbe` on `VESSEL.vst3` = **`PASSED`** (`21/21`, `editor created (1280x800)`, `editor paints`, 8x rapid editor open/close).
+- **Stage 5 Status:** `PASS`. **Next:** `Stage 6`.
