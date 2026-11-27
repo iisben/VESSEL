@@ -50,8 +50,11 @@ struct FactoryPreset
 class PresetBank
 {
 public:
-    /** The compiled-in factory bank. Parsed once, on first use (the processor constructor). */
+    /** The compiled-in factory bank (V1 factory bank followed by V2 flagship presets). Parsed once on first use. */
     static const PresetBank& factory();
+
+    /** The 20 VESSEL II flagship commercial showcase presets (compiled in via V2FlagshipBank.xml). */
+    static const PresetBank& v2Flagship();
 
     /** Anything the factory bank's parser rejected (unknown ids, bad values). Empty for a shipping bank. */
     static const juce::StringArray& factoryErrors();
@@ -72,6 +75,7 @@ public:
 
     const std::vector<FactoryPreset>& all() const noexcept { return presets; }
     int size() const noexcept { return (int) presets.size(); }
+    void append (const FactoryPreset& p) { presets.push_back (p); }
     juce::StringArray categories() const;   // in bank order, unique
 
     /** The canonical category order of the taxonomy. */

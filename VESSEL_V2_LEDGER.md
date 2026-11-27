@@ -1,7 +1,7 @@
 # VESSEL II — Engineering & QA Ledger
 
-- **Current Stage:** `Stage 5: PASS`
-- **Next Stage:** `Stage 6`
+- **Current Stage:** `Stage 6: PASS`
+- **Next Stage:** `Stage 7`
 - **Branch:** `feat/vessel-v2-namm` (initialized from V1.0.1 baseline on `main`; no git remote configured yet)
 - **DSP Core Freeze:** `FROZEN` (after Stage 3B — do not modify frozen DSP math files in Stages 4–7)
 
@@ -195,3 +195,36 @@
   - `Vessel2QA --strict --compare-v1 build/vessel2_qa/v1_preset_frozen_3b.csv --stage4-qa` = **`PASS=9 FAIL=0 PENDING=0`** (`maxRegress=0.022 dB <= 0.05 dB`, `16v` median `12.41%` RT / p95 `13.75%` RT, idle `0.293%` RT).
   - `HostProbe` on `VESSEL.vst3` = **`PASSED`** (`21/21`, `editor created (1280x800)`, `editor paints`, 8x rapid editor open/close).
 - **Stage 5 Status:** `PASS`. **Next:** `Stage 6`.
+
+---
+
+## Stage 6 — 20 Flagship Production-Ready Presets (Closed-Loop Audio QA)
+- **Frozen DSP Audit:** `git diff Source/dsp/` = **0 lines changed** (DSP core strictly untouched); V1 `Presets/FactoryBank.xml` (96 presets, indices `0..95`) untouched.
+- **V2 Bank & Harness (`Presets/V2FlagshipBank.xml`, `Source/Presets.{h,cpp}`, `CMakeLists.txt`, `tools/Vessel2PresetQA.cpp`):** Compiled 20 new commercial V2 presets (`version="2"`, appended at factory indices `96..115`, exposed via `PresetBank::v2Flagship()`, `0` parse errors, `0` third-party names across all text & wavetables; added `Club` category) + permanent headless C++20 `Vessel2PresetQA` harness (`0` warnings) exporting 20× 4.000s `48 kHz / 24-bit` stereo WAV audition clips to `build/vessel2_qa/audition/`.
+
+| # | Preset | Cat | audRMS / stdRMS | Worst TP | Steady DC | Sub120 Corr / Mono Drop | Centroid | Macros (M1..M4) / MW / AT |
+|---|---|---|---|---|---|---|---|---|
+| 01 | Abyssal Monolith | Sub | `-11.1 / -12.3` | `-4.26` | `-97.1` | `1.000 / 0.00 dB` | `179 Hz` | `WEIGHT\|FRACTURE\|DRIFT\|ABYSS` (`4.1..18.8x`) / `7.4` / `5.0` |
+| 02 | Tectonic Reese | Bass | `-14.6 / -14.8` | `-7.43` | `-94.7` | `0.999 / 0.01 dB` | `564 Hz` | `SNARL\|THROB\|MASS\|VOID` (`2.4..18.5x`) / `3.0` / `11.4` |
+| 03 | Subterranean Acid | Bass | `-11.2 / -11.5` | `-1.02` | `-81.7` | `1.000 / 0.00 dB` | `3336 Hz` | `ACID\|VENOM\|SNAP\|CHAMBER` (`4.1..19.0x`) / `21.7` / `13.2` |
+| 04 | Ferrofluid 808 | Sub | `-13.5 / -14.1` | `-4.60` | `-86.3` | `1.000 / 0.00 dB` | `477 Hz` | `KNOCK\|DRIVE\|SUSTAIN\|RUST` (`2.4..41.0x`) / `29.2` / `1.5` |
+| 05 | Valkyrie Brass | Lead | `-14.4 / -14.4` | `-1.02` | `-100.2` | `0.996 / 0.30 dB` | `3332 Hz` | `FLARE\|TAPE\|GROWTH\|HORIZON` (`2.8..6.1x`) / `2.0` / `2.9` |
+| 06 | Oxide Siren | Lead | `-14.0 / -13.4` | `-1.02` | `-100.3` | `0.998 / 0.06 dB` | `2157 Hz` | `SCREAM\|VOWEL\|WARP\|GHOST` (`3.2..15.3x`) / `2.1` / `7.1` |
+| 07 | Ashen Horn | Lead | `-14.3 / -14.2` | `-1.02` | `-96.9` | `0.998 / 0.06 dB` | `1878 Hz` | `BREATH\|AGED\|BRASS\|VAULT` (`2.1..8.4x`) / `2.1` / `5.0` |
+| 08 | Neon Fracture | Lead | `-13.1 / -15.4` | `-1.02` | `-82.2` | `0.999 / 0.27 dB` | `5163 Hz` | `RAZOR\|SHRED\|PULSE\|SPACE` (`2.8..6.3x`) / `3.8` / `4.1` |
+| 09 | Obsidian Cathedral | Pad | `-14.5 / -14.2` | `-1.02` | `-89.9` | `1.000 / 0.21 dB` | `2517 Hz` | `SANCTUM\|CHOIR\|DECAY\|WEIGHT` (`3.8..10.1x`) / `7.4` / `4.4` |
+| 10 | Glacial Void | Pad | `-13.4 / -13.0` | `-1.11` | `-89.9` | `1.000 / 0.18 dB` | `1544 Hz` | `SHIMMER\|FREEZE\|WIND\|DRIFT` (`2.5..25.0x`) / `2.5` / `14.6` |
+| 11 | Rust Requiem | Pad | `-14.0 / -13.8` | `-1.02` | `-81.0` | `1.000 / 0.07 dB` | `1159 Hz` | `BLOOM\|OXIDE\|WARMTH\|HALL` (`3.3..4.9x`) / `1.4` / `1.3` |
+| 12 | Solar Eclipse | Pad | `-13.4 / -14.5` | `-1.02` | `-91.2` | `1.000 / 0.32 dB` | `1233 Hz` | `ECLIPSE\|CORONA\|SWELL\|ABYSS` (`1.9..9.4x`) / `1.3` / `7.5` |
+| 13 | Cryo Bell | Pluck | `-13.0 / -15.8` | `-1.02` | `-98.5` | `0.994 / 0.18 dB` | `4517 Hz` | `CRYSTAL\|RUST\|STRIKE\|CAVERN` (`1.5..3.9x`) / `1.4` / `2.7` |
+| 14 | Clockwork Mallet | Pluck | `-13.6 / -16.0` | `-1.02` | `-110.1` | `0.997 / 0.14 dB` | `1098 Hz` | `SNAP\|FRACTURE\|MOTION\|ROOM` (`2.4..17.4x`) / `3.5` / `7.0` |
+| 15 | Glass Tines | Keys | `-13.4 / -15.1` | `-1.02` | `-104.7` | `0.997 / 0.08 dB` | `4009 Hz` | `TINE\|TAPE\|BARK\|AMBIENCE` (`3.2..7.8x`) / `2.1` / `3.3` |
+| 16 | Iron Harpsichord | Keys | `-13.9 / -16.3` | `-1.02` | `-99.7` | `0.998 / 0.16 dB` | `4098 Hz` | `PLUCK\|GRIT\|DETUNE\|CHAMBER` (`1.4..3.0x`) / `2.2` / `2.5` |
+| 17 | Kinetic Anthem | Club | `-12.8 / -12.7` | `-1.02` | `-94.1` | `1.000 / 0.27 dB` | `4496 Hz` | `DROP\|PUNCH\|WIDTH\|TENSION` (`2.5..7.0x`) / `1.6` / `6.1` |
+| 18 | Strobe Hook | Club | `-14.4 / -14.6` | `-1.02` | `-83.5` | `1.000 / 0.10 dB` | `2029 Hz` | `CUT\|PULSE\|FILTH\|RUSH` (`1.6..11.4x`) / `1.2` / `6.1` |
+| 19 | Hyperdrive Riser | Club | `-13.1 / -13.3` | `-1.02` | `-83.3` | `1.000 / 0.07 dB` | `1504 Hz` | `IGNITE\|SURGE\|OVERLOAD\|ABYSS` (`1.7..27.2x`) / `2.4` / `15.9` |
+| 20 | Monolith Drop | Club | `-14.8 / -15.2` | `-2.15` | `-101.5` | `1.000 / 0.02 dB` | `1822 Hz` | `ROAR\|SUB\|CRUSH\|ARENA` (`1.4..5.0x`) / `1.9` / `6.5` |
+
+- **Verification (Release `-O3`):** `Vessel2PresetQA` = **`PASS=20/20 FAIL=0`** (timbral diversity 190 pairs `minSpecDist=3.57 dB`, `nearDups=0`; `20/20` 48 kHz/24-bit stereo 4.000s audition WAVs verified); `Vessel2QA --strict --compare-v1 build/vessel2_qa/v1_preset_frozen_3b.csv --stage4-qa` = **`PASS=9 FAIL=0 PENDING=0`** (Gate 7 restricted to V1 bank `rendered=16/96`, snapshot set identical to frozen S3B, `maxRegress=0.025 dB <= 0.05 dB`; `16v` median `12.92%` RT / p95 `14.08%` RT, idle `0.304%` RT); `HostProbe` on `VESSEL.vst3` = **`PASSED` (21/21)**.
+- **QA Notes:** Preset DC is asserted as Blackman-Harris steady-state DC on held sustained/chord windows (full-clip mean was dominated by sub-1 Hz note-envelope energy, not static offset). `Ferrofluid 808` uses the generic "808" bass term — rename if strict trademark avoidance is required.
+- **Stage 6 Status:** `PASS`. **Next:** `Stage 7`.

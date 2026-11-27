@@ -1203,15 +1203,18 @@ GateResult runGate7 (const fs::path& outDir, const fs::path& compareCsv)
     constexpr double sr = 48000.0;
 
     const auto& bank = PresetBank::factory().all();
+    // V1 factory presets only (V2 flagship presets are appended after them and verified by Vessel2PresetQA),
+    // so the locked V1 snapshot selection stays identical to the frozen Stage 3B baseline.
+    const size_t v1Count = bank.size() - std::min (bank.size(), (size_t) PresetBank::v2Flagship().size());
     // Pick up to 16 diverse presets: first of each category, then evenly spaced across the bank
     std::vector<size_t> selected;
     std::set<std::string> seenCat;
-    for (size_t i = 0; i < bank.size(); ++i)
+    for (size_t i = 0; i < v1Count; ++i)
     {
         const auto cat = bank[i].category.toStdString();
         if (seenCat.insert (cat).second) selected.push_back (i);
     }
-    for (size_t i = 0; i < bank.size() && selected.size() < 16; i += std::max<size_t> (1, bank.size() / 16))
+    for (size_t i = 0; i < v1Count && selected.size() < 16; i += std::max<size_t> (1, v1Count / 16))
         if (std::find (selected.begin(), selected.end(), i) == selected.end()) selected.push_back (i);
 
     std::map<std::string, double> refRms;
@@ -1257,7 +1260,7 @@ GateResult runGate7 (const fs::path& outDir, const fs::path& compareCsv)
     }
 
     if (finiteFails > 0) res.status = GateStatus::Fail;
-    res.summary = "rendered=" + std::to_string (selected.size()) + "/" + std::to_string (bank.size())
+    res.summary = "rendered=" + std::to_string (selected.size()) + "/" + std::to_string (v1Count)
                 + ", nonFinite=" + std::to_string (finiteFails) + ", minSub120Corr=" + fmt (minCorr, 3)
                 + (refRms.empty() ? "" : ", maxRegress=" + fmt (maxRegressDb, 3) + "dB");
     return res;

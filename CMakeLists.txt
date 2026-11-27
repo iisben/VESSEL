@@ -51,9 +51,10 @@ if(APPLE AND TARGET Vessel_AU)
     VERBATIM)
 endif()
 
-# Factory preset bank + embedded SIL OFL typography (Space Grotesk + JetBrains Mono), compiled in
+# Factory preset banks (V1 + V2 Flagship) + embedded SIL OFL typography (Space Grotesk + JetBrains Mono), compiled in
 juce_add_binary_data(VesselData SOURCES
   Presets/FactoryBank.xml
+  Presets/V2FlagshipBank.xml
   Resources/Fonts/SpaceGrotesk-Bold.ttf
   Resources/Fonts/SpaceGrotesk-Medium.ttf
   Resources/Fonts/JetBrainsMono-Medium.ttf)
@@ -197,6 +198,35 @@ if(VESSEL_BUILD_QA)
   target_link_libraries(Vessel2UiQA PRIVATE
     VesselData
     juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_lto_flags
+    juce::juce_recommended_warning_flags)
+
+  # Headless Stage 6 V2 Flagship 20-Preset Closed-Loop Audio QA & 24-bit WAV Audition Exporter
+  juce_add_console_app(Vessel2PresetQA PRODUCT_NAME "Vessel2PresetQA")
+  target_sources(Vessel2PresetQA PRIVATE
+    tools/Vessel2PresetQA.cpp
+    Source/Parameters.cpp
+    Source/Presets.cpp
+    Source/PluginProcessor.cpp
+    Source/dsp/Wavetable.cpp
+    Source/dsp/Tables.cpp)
+  target_include_directories(Vessel2PresetQA PRIVATE Source)
+  target_compile_definitions(Vessel2PresetQA PRIVATE
+    VESSEL_HEADLESS=1
+    VESSEL_TABLES_DIR="${CMAKE_SOURCE_DIR}/Wavetables"
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_USE_FLAC=1)
+  if(WIN32)
+    target_compile_definitions(Vessel2PresetQA PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  target_link_libraries(Vessel2PresetQA PRIVATE
+    VesselData
+    juce::juce_audio_processors
+    juce::juce_audio_formats
     juce::juce_dsp
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
