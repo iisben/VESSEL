@@ -2,7 +2,9 @@
 build/
 build-*/
 cmake-build-*/
+dist/
 out/
+compile_commands.json
 .vs/
 .vscode/
 .idea/
