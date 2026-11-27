@@ -200,37 +200,6 @@ VST3 is built on GitHub Actions and passes the same `HostProbe` tests there, but
 
 Windows yet. Linux is untested, and none of the builds are code-signed (no Developer ID or notarisation on macOS).
 
-Markdown
-# VESSEL
-
-VESSEL is a synthesizer and multi-stage effects plugin built for film scoring, trailers, IDM, and dark electronic production.
-
-Audio flows sequentially through five processing stages—**Source**, **Ruin**, **Shape**, **Space**, and **Pressure**—starting from a phase-locked sub-oscillator and finishing with multiband dynamics, mono low-end summing, and true-peak limiting. The instrument includes 379 wavetables, a 2-operator FM voice, a physical-modeling resonator, eight standardized macros per preset, and per-preset velocity, mod wheel, and aftertouch routing.
-
-![VESSEL Source stage with an imported wavetable and FM operator](docs/images/stage0_fm.png)
-
-| II · Ruin | III · Shape |
-|---|---|
-| ![Ruin stage: tilt, tube saturation, bias, bit crusher, VHS, tape motor](docs/images/stage1.png) | ![Shape stage: ladder filters, envelope follower, unmask, formant, and gong resonator](docs/images/stage2_gong.png) |
-
-| IV · Space | V · Pressure |
-|---|---|
-| ![Space stage: Z-depth, body convolution, Black Hole reverb, and Haas widener](docs/images/stage3.png) | ![Pressure stage: 3-band upward/downward compressor and sub-keyed ducker](docs/images/stage4.png) |
-
-![Dark mode UI with cursor-tracked spotlight](docs/images/torch_far.png)
-
-![Drag-and-drop modulation mapping: LFO 2 assigned to resonator decay](docs/images/mapping.png)
-
-| LFO Deck | Expression Deck |
-|---|---|
-| ![Warped LFO with four modulation routes](docs/images/lfo.png) | ![Velocity, mod wheel, and aftertouch routing controls](docs/images/expression.png) |
-
-| Preset Browser | Cinematic Category (28 Presets) |
-|---|---|
-| ![Preset browser overview](docs/images/browser.png) | ![Cinematic preset category view](docs/images/browser_cinematic.png) |
-
-## Architecture & Features
-
 - **Source:** Dual phase-locked sub-harmonic generators for consistent low-end phase alignment, a wavetable oscillator (379 bundled tables plus a built-in analog table), a 2-operator FM voice, a slow drone generator, vinyl/dust noise, and a tempo-synced granular looper with freeze and stutter modes.
 - **Ruin:** Three-mode tube saturation (triode, pentode, and starved), power-supply sag, bit crusher, VHS pitch drift and dropouts, and a MIDI-playable tape stop.
 - **Shape:** Dual self-oscillating ladder filters, an envelope follower, a sub-unmasking filter, a vowel/cello formant filter, and a physical-modeling resonator with eight models (string, tube, bell, bar, drum skin, plate, singing bowl, and gong).
