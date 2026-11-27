@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# One-click local native Linux x86_64 Release build, QA & packager for VESSEL II.
+# Native Linux x86_64 Release build, QA, local install (--install), and packager for VESSEL 2.0.
 # Required packages on Ubuntu 24.04 / Debian:
 #   sudo apt-get install -y build-essential cmake ninja-build pkg-config \
 #     libasound2-dev libfreetype-dev libfontconfig1-dev libx11-dev \
 #     libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev \
-#     libxrandr-dev libxrender-dev libgl1-mesa-dev libjack-jackd2-dev ladspa-sdk
+#     libxrandr-dev libxrender-dev libgl1-mesa-dev libgl1-mesa-dri \
+#     libglu1-mesa-dev libjack-jackd2-dev ladspa-sdk
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build-linux}"
 SKIP_QA="${SKIP_QA:-0}"
+DO_INSTALL=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --install) DO_INSTALL=1 ;;
+    --skip-qa) SKIP_QA=1 ;;
+  esac
+done
 
 cd "${REPO_ROOT}"
+
+VERSION="$(grep -E '^project\(VESSEL VERSION ' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')"
 
 GENERATOR_ARGS=()
 if command -v ninja >/dev/null 2>&1; then
@@ -24,7 +35,7 @@ if [[ -n "${VESSEL_JUCE_PATH:-}" ]]; then
   JUCE_ARGS=("-DVESSEL_JUCE_PATH=${VESSEL_JUCE_PATH}")
 fi
 
-echo "==> Configuring VESSEL II (Linux x86_64 Release)..."
+echo "==> Configuring VESSEL ${VERSION} (Linux x86_64 Release)..."
 cmake -S . -B "${BUILD_DIR}" "${GENERATOR_ARGS[@]}" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
@@ -49,7 +60,8 @@ if [[ "${SKIP_QA}" != "1" ]]; then
   if command -v pluginval >/dev/null 2>&1; then
     echo "==> Running pluginval (strictness level 5)..."
     if command -v xvfb-run >/dev/null 2>&1 && [[ -z "${DISPLAY:-}" ]]; then
-      xvfb-run -a pluginval --strictness-level 5 --validate-in-process --timeout-ms 120000 \
+      LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1400x900x24" \
+        pluginval --strictness-level 5 --validate-in-process --timeout-ms 120000 \
         --validate "${BUILD_DIR}/Vessel_artefacts/Release/VST3/VESSEL.vst3"
     else
       pluginval --strictness-level 5 --validate-in-process --timeout-ms 120000 \
@@ -60,9 +72,16 @@ if [[ "${SKIP_QA}" != "1" ]]; then
   fi
 fi
 
-echo "==> Packaging dist/linux/VESSEL-II-Linux-x86_64.tar.gz..."
-STAGE="${REPO_ROOT}/dist/linux/VESSEL-II-Linux-x86_64"
-ARCHIVE="${REPO_ROOT}/dist/linux/VESSEL-II-Linux-x86_64.tar.gz"
+if [[ "${DO_INSTALL}" == "1" ]]; then
+  echo "==> Installing VST3 to ~/.vst3/VESSEL.vst3..."
+  mkdir -p "${HOME}/.vst3"
+  rm -rf "${HOME}/.vst3/VESSEL.vst3"
+  cp -r "${BUILD_DIR}/Vessel_artefacts/Release/VST3/VESSEL.vst3" "${HOME}/.vst3/"
+fi
+
+echo "==> Packaging dist/linux/VESSEL-${VERSION}-Linux-x86_64.tar.gz..."
+STAGE="${REPO_ROOT}/dist/linux/VESSEL-${VERSION}-Linux-x86_64"
+ARCHIVE="${REPO_ROOT}/dist/linux/VESSEL-${VERSION}-Linux-x86_64.tar.gz"
 rm -rf "${STAGE}" "${ARCHIVE}"
 mkdir -p "${STAGE}/Standalone"
 
@@ -71,7 +90,7 @@ cp "${BUILD_DIR}/Vessel_artefacts/Release/Standalone/VESSEL" "${STAGE}/Standalon
 cp -r "${BUILD_DIR}/Vessel_artefacts/Release/Standalone/Wavetables" "${STAGE}/Standalone/"
 cp "${REPO_ROOT}/docs/INSTALL-Linux.txt" "${STAGE}/INSTALL-Linux.txt"
 
-tar -czf "${ARCHIVE}" -C "${REPO_ROOT}/dist/linux" VESSEL-II-Linux-x86_64
+tar -czf "${ARCHIVE}" -C "${REPO_ROOT}/dist/linux" "VESSEL-${VERSION}-Linux-x86_64"
 rm -rf "${STAGE}"
 
 echo "DONE: ${ARCHIVE}"

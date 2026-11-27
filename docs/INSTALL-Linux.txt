@@ -1,5 +1,5 @@
-VESSEL II for Linux (x86_64)
-============================
+VESSEL 2.0 for Linux (x86_64)
+=============================
 
 VST3
 ----
@@ -8,7 +8,7 @@ Copy the entire VESSEL.vst3 folder to:
     ~/.vst3/
 
 Keep the folder intact: the 379 wavetables live inside VESSEL.vst3/Contents/Resources/Wavetables.
-Then rescan plug-ins in your Linux VST3 DAW.
+Then rescan plug-ins in your Linux VST3 DAW (REAPER, Bitwig, Ardour, Renoise, etc.).
 
 Standalone
 ----------
@@ -18,4 +18,10 @@ User Presets & Settings
 -----------------------
 Stored automatically in:
 
-    ~/.config/VESSEL_II/ (via JUCE userApplicationDataDirectory)
+    ~/.config/VESSEL_II/
+
+Runtime Requirements
+--------------------
+- OpenGL 3.2+ (Mesa / NVIDIA / AMD GPU driver)
+- ALSA / JACK / PipeWire audio, FreeType, Fontconfig, X11
+- All 379 CC0 wavetables and 116 factory presets (96 V1 + 20 V2 flagship) are bundled.
