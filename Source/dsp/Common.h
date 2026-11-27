@@ -6,6 +6,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <numbers>
 #include <vector>
 
@@ -583,6 +584,12 @@ private:
     {
         using VF = juce::dsp::SIMDRegister<float>;
         constexpr int kW = (int) VF::SIMDNumElements;
+        auto loadUnaligned = [] (const float* ptr) noexcept -> VF
+        {
+            alignas (32) float tmp[kW];
+            std::memcpy (tmp, ptr, sizeof (tmp));
+            return VF::fromRawArray (tmp);
+        };
         for (int i = 0; i < n; ++i)
         {
             w = (w - 1) & Mask;
@@ -592,7 +599,7 @@ private:
             int m = 0;
             for (; m + kW <= Half; m += kW)
             {
-                const VF vx = VF::fromRawArray (p + m);
+                const VF vx = loadUnaligned (p + m);
                 ve = VF::multiplyAdd (ve, VF::fromRawArray (hE + m), vx);
                 vo = VF::multiplyAdd (vo, VF::fromRawArray (hO + m), vx);
             }
@@ -614,6 +621,12 @@ private:
     {
         using VF = juce::dsp::SIMDRegister<float>;
         constexpr int kW = (int) VF::SIMDNumElements;
+        auto loadUnaligned = [] (const float* ptr) noexcept -> VF
+        {
+            alignas (32) float tmp[kW];
+            std::memcpy (tmp, ptr, sizeof (tmp));
+            return VF::fromRawArray (tmp);
+        };
         for (int i = 0; i < nOut; ++i)
         {
             w = (w - 1) & Mask;
@@ -623,11 +636,11 @@ private:
             int k = 0;
             for (; k + 2 * kW <= Pad; k += 2 * kW)
             {
-                v0 = VF::multiplyAdd (v0, VF::fromRawArray (h + k),      VF::fromRawArray (p + k));
-                v1 = VF::multiplyAdd (v1, VF::fromRawArray (h + k + kW), VF::fromRawArray (p + k + kW));
+                v0 = VF::multiplyAdd (v0, VF::fromRawArray (h + k),      loadUnaligned (p + k));
+                v1 = VF::multiplyAdd (v1, VF::fromRawArray (h + k + kW), loadUnaligned (p + k + kW));
             }
             for (; k + kW <= Pad; k += kW)
-                v0 = VF::multiplyAdd (v0, VF::fromRawArray (h + k), VF::fromRawArray (p + k));
+                v0 = VF::multiplyAdd (v0, VF::fromRawArray (h + k), loadUnaligned (p + k));
             float acc = (v0 + v1).sum();
             for (; k < Pad; ++k) acc += h[k] * p[k];
             out[i] = acc;

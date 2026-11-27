@@ -134,9 +134,8 @@ jobs:
         run: cmake -S . -B build -A x64 -DVESSEL_BUILD_QA=ON
 
       - name: Build VST3, Standalone & Headless QA
-        run: |
-          cmake --build build --config Release --parallel \
-            --target Vessel_VST3 Vessel_Standalone Vessel2QA Vessel2PresetQA
+        shell: pwsh
+        run: cmake --build build --config Release --parallel --target Vessel_VST3 Vessel_Standalone Vessel2QA Vessel2PresetQA
 
       - name: Run 8-Gate DSP QA & 20-Preset Audio QA
         shell: pwsh
@@ -209,9 +208,7 @@ jobs:
             -DVESSEL_BUILD_QA=ON
 
       - name: Build VST3, Standalone & Headless QA
-        run: |
-          cmake --build build --config Release --parallel \
-            --target Vessel_VST3 Vessel_Standalone Vessel2QA Vessel2PresetQA
+        run: cmake --build build --config Release --parallel --target Vessel_VST3 Vessel_Standalone Vessel2QA Vessel2PresetQA
 
       - name: Run 8-Gate DSP QA & 20-Preset Audio QA
         run: |

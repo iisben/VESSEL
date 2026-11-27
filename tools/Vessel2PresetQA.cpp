@@ -622,6 +622,7 @@ struct PresetQaSummary
 
 int main (int argc, char** argv)
 {
+    juce::ScopedJuceInitialiser_GUI juceInit;
     fs::path bankPath;
     fs::path auditionDir = "build/vessel2_qa/audition";
     fs::path reportPath = "build/vessel2_qa/preset_qa_report.txt";
