@@ -84,6 +84,10 @@ target_compile_definitions(Vessel PUBLIC
 if(WIN32)
   target_compile_definitions(Vessel PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
+if(MSVC)
+  target_compile_options(Vessel PRIVATE /utf-8 /bigobj)
+  target_compile_options(VesselData PRIVATE /utf-8 /bigobj)
+endif()
 
 target_link_libraries(Vessel
   PRIVATE
@@ -103,7 +107,7 @@ foreach(fmt VST3 AU Standalone)
 endforeach()
 
 # juce_add_bundle_resources_directory only works on Apple. On Windows/Linux copy Wavetables beside targets.
-if(WIN32 OR UNIX AND NOT APPLE)
+if(WIN32 OR (UNIX AND NOT APPLE))
   if(TARGET Vessel_VST3)
     add_custom_command(TARGET Vessel_VST3 POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Wavetables" "$<TARGET_FILE_DIR:Vessel_VST3>/../Resources/Wavetables"
@@ -134,6 +138,9 @@ if(VESSEL_BUILD_CHECK)
   juce_add_console_app(HostProbe PRODUCT_NAME "HostProbe")
   target_sources(HostProbe PRIVATE tools/HostProbe.cpp)
   target_compile_definitions(HostProbe PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+  if(WIN32)
+    target_compile_definitions(HostProbe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
   target_link_libraries(HostProbe PRIVATE juce::juce_audio_utils juce::juce_audio_processors
                         juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
 endif()
@@ -159,6 +166,9 @@ if(VESSEL_BUILD_QA)
     JUCE_USE_FLAC=1)
   if(WIN32)
     target_compile_definitions(Vessel2QA PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  if(MSVC)
+    target_compile_options(Vessel2QA PRIVATE /utf-8 /bigobj)
   endif()
   target_link_libraries(Vessel2QA PRIVATE
     VesselData
@@ -195,6 +205,9 @@ if(VESSEL_BUILD_QA)
   if(WIN32)
     target_compile_definitions(Vessel2UiQA PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   endif()
+  if(MSVC)
+    target_compile_options(Vessel2UiQA PRIVATE /utf-8 /bigobj)
+  endif()
   target_link_libraries(Vessel2UiQA PRIVATE
     VesselData
     juce::juce_audio_utils
@@ -222,6 +235,9 @@ if(VESSEL_BUILD_QA)
     JUCE_USE_FLAC=1)
   if(WIN32)
     target_compile_definitions(Vessel2PresetQA PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  if(MSVC)
+    target_compile_options(Vessel2PresetQA PRIVATE /utf-8 /bigobj)
   endif()
   target_link_libraries(Vessel2PresetQA PRIVATE
     VesselData

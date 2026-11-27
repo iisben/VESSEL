@@ -1,0 +1,32 @@
+VESSEL II for macOS Universal (Apple Silicon arm64 + Intel x86_64)
+==================================================================
+
+Audio Unit (AU)
+---------------
+Copy VESSEL.component to:
+
+    ~/Library/Audio/Plug-Ins/Components/
+
+VST3
+----
+Copy VESSEL.vst3 to:
+
+    ~/Library/Audio/Plug-Ins/VST3/
+
+Standalone
+----------
+Copy VESSEL.app to /Applications or ~/Applications.
+
+User Presets & Settings
+-----------------------
+Stored automatically in:
+
+    ~/Library/Application Support/VESSEL_II/
+
+Notes
+-----
+- Requires macOS 11.0 or later.
+- All 379 CC0 wavetables and 116 factory presets (96 V1 + 20 VESSEL II flagship)
+  are bundled inside each plugin and Standalone package.
+- This archive is ad-hoc signed; if Gatekeeper prompts on first launch,
+  right-click VESSEL.app -> Open (or run: xattr -dr com.apple.quarantine <bundle>).
