@@ -70,6 +70,8 @@ public:
         reset();
     }
 
+    void reseed (uint32_t seedVal) noexcept { rng.seed (seedVal ? seedVal : 0x51A7u); }
+
     void reset()
     {
         for (auto& s : slots) { clearState (s); s.note = -1; s.quietSamples = 0; s.held = s.sustained = s.active = s.pendingOff = false; s.pending = -1; }

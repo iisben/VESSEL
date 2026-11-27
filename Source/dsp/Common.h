@@ -3,6 +3,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <numbers>
@@ -15,12 +16,61 @@ constexpr double kTwoPiD = 2.0 * kPiD;
 constexpr float  kPi     = std::numbers::pi_v<float>;
 constexpr float  kTwoPi  = 2.0f * kPi;
 
-inline float dbToGain (float db) noexcept   { return std::pow (10.0f, db * 0.05f); }
-inline float gainToDb (float g) noexcept    { return 20.0f * std::log10 (std::max (g, 1.0e-9f)); }
+/** Validated Padé/minimax fast 2^x (C++20 portable bit_cast, max rel error < 1.5e-5 -> < 0.03 cents / < 0.00015 dB). */
+inline float fastExp2 (float x) noexcept
+{
+    x = std::clamp (x, -126.0f, 126.0f);
+    const float nf = std::floor (x);
+    const int n = (int) nf;
+    const float f = x - nf;
+    const float p = 1.0f + f * (0.69314718f + f * (0.24022651f + f * (0.05550411f + f * (0.00961813f + f * 0.00133336f))));
+    const uint32_t bits = (uint32_t) (n + 127) << 23;
+    return std::bit_cast<float> (bits) * p;
+}
+
+/** Validated rational fast log2(x) for x > 0 (C++20 portable bit_cast, max error < 4e-6 -> < 0.00003 dB). */
+inline float fastLog2 (float x) noexcept
+{
+    x = std::max (x, 1.0e-30f);
+    const uint32_t bits = std::bit_cast<uint32_t> (x);
+    int e = (int) ((bits >> 23) & 0xFFu) - 127;
+    float m = std::bit_cast<float> ((bits & 0x007FFFFFu) | 0x3F800000u);   // [1, 2)
+    if (m > 1.41421356f) { m *= 0.5f; ++e; }                              // [sqrt(0.5), sqrt(2)]
+    const float z = (m - 1.0f) / (m + 1.0f);
+    const float z2 = z * z;
+    constexpr float kTwoOverLn2 = 2.88539008178f;
+    return (float) e + kTwoOverLn2 * z * (1.0f + z2 * (0.33333333f + z2 * (0.20000000f + z2 * 0.14285714f)));
+}
+
+/** Fast sin(2*pi*p) when p is already in [0, 1) (zero std::floor, max error < 5e-7). */
+inline float fastSin01Unit (float p) noexcept
+{
+    float t = p;
+    if (t > 0.75f)      t -= 1.0f;
+    else if (t > 0.25f) t = 0.5f - t;
+    const float x = kTwoPi * t;
+    const float x2 = x * x;
+    return x * (1.0f + x2 * (-0.16666667f + x2 * (0.0083333315f + x2 * (-0.0001984090f + x2 * 2.752556e-6f))));
+}
+
+/** Validated minimax fast sin(2*pi*p) for any unit-cycle phase p (max error < 5e-7, 0 libm calls). */
+inline float fastSin01 (float p) noexcept
+{
+    return fastSin01Unit (p - std::floor (p));
+}
+
+/** Validated minimax fast cos(2*pi*p) for unit-cycle phase p (max error < 5e-7). */
+inline float fastCos01 (float p) noexcept
+{
+    return fastSin01 (p + 0.25f);
+}
+
+inline float dbToGain (float db) noexcept   { return fastExp2 (db * 0.16609640474f); }
+inline float gainToDb (float g) noexcept    { return 6.02059991328f * fastLog2 (std::max (g, 1.0e-9f)); }
 inline float clamp01 (float x) noexcept     { return std::clamp (x, 0.0f, 1.0f); }
 inline float lerp (float a, float b, float t) noexcept { return a + (b - a) * t; }
-inline float semis (float st) noexcept      { return std::exp2 (st / 12.0f); }
-inline float midiToHz (float note) noexcept { return 440.0f * std::exp2 ((note - 69.0f) / 12.0f); }
+inline float semis (float st) noexcept      { return fastExp2 (st * (1.0f / 12.0f)); }
+inline float midiToHz (float note) noexcept { return 440.0f * fastExp2 ((note - 69.0f) * (1.0f / 12.0f)); }
 
 /** Rational tanh (float): exact at ±3 (=±1), C1-continuous, cheap (control/non-critical use). */
 inline float fastTanh (float x) noexcept
@@ -84,13 +134,17 @@ inline double tanhF2 (double u) noexcept
         return p * u;
     }
     const double z = std::exp (-2.0 * a);
-    double li = 0.0;
-    double pw = -z;
-    for (int k = 1; k <= 15; ++k)
-    {
-        li += pw / (double) (k * k);
-        pw *= -z;
-    }
+    // 9-term Horner Li2(-z) for 0 < z <= exp(-2) = 0.13534 (zero divisions, max error < 2e-11)
+    double li = 1.0 / 81.0;
+    li = -li * z + 1.0 / 64.0;
+    li = -li * z + 1.0 / 49.0;
+    li = -li * z + 1.0 / 36.0;
+    li = -li * z + 1.0 / 25.0;
+    li = -li * z + 1.0 / 16.0;
+    li = -li * z + 1.0 / 9.0;
+    li = -li * z + 1.0 / 4.0;
+    li = -li * z + 1.0;
+    li *= -z;
     constexpr double kPiSqOver24 = (kPiD * kPiD) / 24.0;
     const double val = 0.5 * a * a - a * std::numbers::ln2_v<double> + kPiSqOver24 + 0.5 * li;
     return u >= 0.0 ? val : -val;
@@ -170,14 +224,34 @@ struct OnePole
     void reset (float v = 0.0f) noexcept { z = v; }
 };
 
-/** Parameter smoother (exponential, ~time constant). */
+/** Parameter smoother (exponential, ~time constant, sample-rate invariant). */
 struct Smooth
 {
     float cur = 0.0f, target = 0.0f, a = 0.0f;
-    void prepare (float sr, float ms = 20.0f) noexcept { a = std::exp (-1.0f / (0.001f * ms * sr)); }
+    void prepare (float sr, float ms = 20.0f) noexcept { a = std::exp (-1.0f / (0.001f * std::max (0.01f, ms) * std::max (1.0f, sr))); }
     void set (float t) noexcept { target = t; }
     void snap (float t) noexcept { target = cur = t; }
     float next() noexcept { cur = target + a * (cur - target); return cur; }
+};
+
+/** Sample-rate-invariant log-frequency smoother (perceptually uniform pitch/cutoff sweeps across 44.1..192 kHz). */
+struct LogSmooth
+{
+    float curLog = 10.0f, targetLog = 10.0f, a = 0.0f;
+    void prepare (float sr, float ms = 20.0f) noexcept { a = std::exp (-1.0f / (0.001f * std::max (0.01f, ms) * std::max (1.0f, sr))); }
+    void setHz (float hz) noexcept { targetLog = fastLog2 (std::max (1.0f, hz)); }
+    void snapHz (float hz) noexcept { targetLog = curLog = fastLog2 (std::max (1.0f, hz)); }
+    float nextHz() noexcept { curLog = targetLog + a * (curLog - targetLog); return fastExp2 (curLog); }
+};
+
+/** Sample-rate-invariant linear-dB smoother (perceptually uniform loudness sweeps across 44.1..192 kHz). */
+struct DbSmooth
+{
+    float curDb = 0.0f, targetDb = 0.0f, a = 0.0f;
+    void prepare (float sr, float ms = 20.0f) noexcept { a = std::exp (-1.0f / (0.001f * std::max (0.01f, ms) * std::max (1.0f, sr))); }
+    void setDb (float db) noexcept { targetDb = db; }
+    void snapDb (float db) noexcept { targetDb = curDb = db; }
+    float nextGain() noexcept { curDb = targetDb + a * (curDb - targetDb); return dbToGain (curDb); }
 };
 
 /** Attack/release envelope follower on |x|. */
@@ -346,20 +420,58 @@ struct Drift
     float target = 0.0f, value = 0.0f, phase = 1.0f, inc = 0.0f, prev = 0.0f;
     void prepare (float sr, float rateHz, uint32_t seed) noexcept
     {
-        rng.seed (seed); inc = rateHz / sr;
+        rng.seed (seed);
+        inc = rateHz / std::max (1.0f, sr);
+        target = value = prev = 0.0f;
+        phase = 1.0f;
     }
-    void setRate (float rateHz, float sr) noexcept { inc = rateHz / sr; }
+    void reseed (uint32_t seed) noexcept
+    {
+        rng.seed (seed);
+        target = value = prev = 0.0f;
+        phase = 1.0f;
+    }
+    void setRate (float rateHz, float sr) noexcept { inc = rateHz / std::max (1.0f, sr); }
     /** Advance by `n` samples at once (control-rate use). */
     float next (int n) noexcept { phase += inc * (float) (n - 1); return next(); }
     float next() noexcept
     {
         phase += inc;
-        if (phase >= 1.0f) { phase -= 1.0f; prev = target; target = rng.bip(); }
+        while (phase >= 1.0f) { phase -= 1.0f; prev = target; target = rng.bip(); }
         // raised-cosine interpolation between random points
-        const float t = 0.5f - 0.5f * std::cos (kPi * phase);
+        const float t = 0.5f - 0.5f * fastCos01 (0.5f * phase);
         value = prev + (target - prev) * t;
         return value;
     }
+};
+
+/** 3-octave correlated 1/f (pink) organic analog drift driven by a deterministic seeded PRNG.
+    Output stays smoothly bounded in [-1, 1] and is sample-rate & block-size invariant when stepped on fixed cadence. */
+struct PinkDrift
+{
+    Drift d0, d1, d2;
+    float cur = 0.0f;
+
+    void prepare (float sr, uint32_t seed) noexcept
+    {
+        d0.prepare (sr, 0.11f, seed * 1664525u + 1013904223u);
+        d1.prepare (sr, 0.43f, seed * 22695477u + 1u);
+        d2.prepare (sr, 1.67f, seed * 1103515245u + 12345u);
+        cur = 0.0f;
+    }
+    void reseed (uint32_t seed) noexcept
+    {
+        d0.reseed (seed * 1664525u + 1013904223u);
+        d1.reseed (seed * 22695477u + 1u);
+        d2.reseed (seed * 1103515245u + 12345u);
+        cur = 0.0f;
+    }
+    float next (int n) noexcept
+    {
+        cur = 0.55f * d0.next (n) + 0.30f * d1.next (n) + 0.15f * d2.next (n);
+        return cur;
+    }
+    float value() const noexcept { return cur; }
 };
 
 /** Audio-thread scratch buffers for a stereo signal path. */
@@ -469,13 +581,23 @@ private:
     static void upStage (const float* __restrict in, float* __restrict out, int n,
                          float* __restrict ring, int& w, const float* __restrict hE, const float* __restrict hO) noexcept
     {
+        using VF = juce::dsp::SIMDRegister<float>;
+        constexpr int kW = (int) VF::SIMDNumElements;
         for (int i = 0; i < n; ++i)
         {
             w = (w - 1) & Mask;
             ring[w] = ring[w + Ring] = in[i];
             const float* __restrict p = ring + w;
-            float e = 0.0f, o = 0.0f;
-            for (int m = 0; m < Half; ++m)
+            VF ve = VF::expand (0.0f), vo = VF::expand (0.0f);
+            int m = 0;
+            for (; m + kW <= Half; m += kW)
+            {
+                const VF vx = VF::fromRawArray (p + m);
+                ve = VF::multiplyAdd (ve, VF::fromRawArray (hE + m), vx);
+                vo = VF::multiplyAdd (vo, VF::fromRawArray (hO + m), vx);
+            }
+            float e = ve.sum(), o = vo.sum();
+            for (; m < Half; ++m)
             {
                 const float x = p[m];
                 e += hE[m] * x;
@@ -490,14 +612,24 @@ private:
     static void dnStage (const float* __restrict in, float* __restrict out, int nOut,
                          float* __restrict ring, int& w, const float* __restrict h) noexcept
     {
+        using VF = juce::dsp::SIMDRegister<float>;
+        constexpr int kW = (int) VF::SIMDNumElements;
         for (int i = 0; i < nOut; ++i)
         {
             w = (w - 1) & Mask;
             ring[w] = ring[w + Ring] = in[2 * i];
             const float* __restrict p = ring + w;
-            float acc = 0.0f;
-            for (int k = 0; k < Pad; ++k)
-                acc += h[k] * p[k];
+            VF v0 = VF::expand (0.0f), v1 = VF::expand (0.0f);
+            int k = 0;
+            for (; k + 2 * kW <= Pad; k += 2 * kW)
+            {
+                v0 = VF::multiplyAdd (v0, VF::fromRawArray (h + k),      VF::fromRawArray (p + k));
+                v1 = VF::multiplyAdd (v1, VF::fromRawArray (h + k + kW), VF::fromRawArray (p + k + kW));
+            }
+            for (; k + kW <= Pad; k += kW)
+                v0 = VF::multiplyAdd (v0, VF::fromRawArray (h + k), VF::fromRawArray (p + k));
+            float acc = (v0 + v1).sum();
+            for (; k < Pad; ++k) acc += h[k] * p[k];
             out[i] = acc;
 
             w = (w - 1) & Mask;

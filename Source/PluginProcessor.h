@@ -11,6 +11,7 @@
 #include "dsp/Space.h"
 #include "dsp/Pressure.h"
 #include "dsp/Modulation.h"
+#include "dsp/Organic.h"
 #include "dsp/Resonator.h"
 #include "dsp/Tables.h"
 
@@ -64,6 +65,9 @@ public:
         return count;
     }
 
+    /** Resettable deterministic PRNG seed & sample-grid reset for headless QA invariance verification. */
+    void setQaDeterministicSeed (uint32_t seed) noexcept;
+
     const juce::String getName() const override { return "VESSEL"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
@@ -111,7 +115,7 @@ private:
     void timerCallback() override;
     void refreshImpulseResponse (bool forceReload);
     void handleMidi (const juce::MidiMessage&);
-    void renderChunk (juce::AudioBuffer<float>& io, int start, int n);
+    void renderChunk (juce::AudioBuffer<float>& io, int start, int n, bool isCtrlTick, int ctrlSpan);
     void smoothControls (int n);
     void applyExpression();
     void applyMacros();
@@ -126,22 +130,42 @@ private:
     /** Modulated plain value: smoothed base (normalised) + LFO/expression offset, mapped through the parameter's range. */
     float pv (int pid) const noexcept
     {
-        return params[(size_t) pid]->convertFrom0to1 (juce::jlimit (0.0f, 1.0f, base[(size_t) pid] + mod[(size_t) pid]));
+        return paramRanges[(size_t) pid].convertFrom0to1 (juce::jlimit (0.0f, 1.0f, base[(size_t) pid] + mod[(size_t) pid]));
+    }
+    float pvBus (int pid) const noexcept
+    {
+        return paramRanges[(size_t) pid].convertFrom0to1 (juce::jlimit (0.0f, 1.0f, busBase[(size_t) pid] + busMod[(size_t) pid]));
     }
     float pvExtra (int pid, float extra) const noexcept
     {
-        return params[(size_t) pid]->convertFrom0to1 (juce::jlimit (0.0f, 1.0f, base[(size_t) pid] + mod[(size_t) pid] + extra));
+        return paramRanges[(size_t) pid].convertFrom0to1 (juce::jlimit (0.0f, 1.0f, base[(size_t) pid] + mod[(size_t) pid] + extra));
     }
-    bool pb (int pid) const noexcept { return params[(size_t) pid]->getValue() > 0.5f; }
-    int  pc (int pid) const noexcept { return juce::roundToInt (params[(size_t) pid]->convertFrom0to1 (params[(size_t) pid]->getValue())); }
+    bool pb (int pid) const noexcept { return rawParams[(size_t) pid]->load (std::memory_order_relaxed) > 0.5f; }
+    int  pc (int pid) const noexcept { return juce::roundToInt (rawParams[(size_t) pid]->load (std::memory_order_relaxed)); }
 
     static constexpr int kChunk = 64;
+    static constexpr int kControlStep = vessel::dsp::VoiceManager::kControlStep;
 
     std::array<juce::RangedAudioParameter*, vessel::NUM_PARAMS> params {};
+    std::array<std::atomic<float>*, vessel::NUM_PARAMS> rawParams {};
+    std::array<juce::NormalisableRange<float>, vessel::NUM_PARAMS> paramRanges {};
+    std::array<uint32_t, vessel::NUM_PARAMS> lastRawBits {};
+    std::array<float, vessel::NUM_PARAMS> targetNorm {};
     std::array<float, vessel::NUM_PARAMS> mod {};
     std::array<float, vessel::NUM_PARAMS> base {};        // smoothed normalised values (audio thread only)
+    std::array<float, vessel::NUM_PARAMS> busMod {};      // snapshot at fixed kChunk=64 boundary for odd-block-invariant bus FX
+    std::array<float, vessel::NUM_PARAMS> busBase {};
     std::array<bool, vessel::NUM_PARAMS> smoothed {};     // continuous params get the 20 ms smoother
+    std::vector<int> floatPids;                           // cached Float parameter indices for zero-virtual smoothing
     bool baseReady = false;
+    bool midiDirty = false;
+    bool voiceOsIdle = true;
+    bool busVoiceActive = false;
+    int busLowestHeld = -1;
+    uint64_t samplePos = 0;
+    int ctrlRem = 0;
+    int busRem = 0;
+    int bodyQuietSamples = 0;
     std::atomic<bool> snapPending { true };               // set by prepare / setStateInformation, consumed on audio thread
 
     // expression (audio thread): raw MIDI values and their smoothed versions
@@ -173,6 +197,9 @@ private:
     vessel::dsp::MultibandOtt ott;
     vessel::dsp::MonoCollapse mono;
     vessel::dsp::Ducker ducker;
+    vessel::dsp::OrganicBus organicBus;
+    vessel::dsp::ProceduralTextureBus textureBus;
+    vessel::dsp::Svf bodyDc1[2], bodyDc2[2];
     vessel::dsp::OutputStage outStage;
     vessel::dsp::DelayLine subAlign;
     vessel::dsp::Smooth convMixS;

@@ -1,9 +1,9 @@
 # VESSEL II — Engineering & QA Ledger
 
-- **Current Stage:** `Stage 3A: PASS`
-- **Next Stage:** `Stage 3B`
+- **Current Stage:** `Stage 3B: PASS — DSP CORE FROZEN`
+- **Next Stage:** `Stage 4`
 - **Branch:** `feat/vessel-v2-namm` (initialized from V1.0.1 baseline on `main`; no git remote configured yet)
-- **DSP Core Freeze:** `NOT FROZEN` (freezes after Stage 3B)
+- **DSP Core Freeze:** `FROZEN` (after Stage 3B — do not modify frozen DSP math files in Stages 4–7)
 
 ---
 
@@ -139,3 +139,27 @@
 
 - **Additional Verification:** `Vessel2QA --strict --gates 1,2,3,4,7,8` = `PASS=6 FAIL=0 PENDING=0`; `VesselLab`: Tube starved C6 `-92.1 dB` (`+31.6 dB`), Clipper C6 `-92.8 dB` (`+17.9 dB`), Sub send 50% `-0.048 dB` @55 Hz, TruePeak `-1.02 dBTP` (bit-exact below ceiling); `HostProbe` on `VESSEL.vst3` = `PASSED` (21/21).
 - **Stage 3A Status:** `PASS` (all 6 required Stage 3A gates PASS strictly + Gate 5 rate-switch & PDC PASS). **Next:** `Stage 3B`.
+
+---
+
+## Stage 3B — Modulation, Dark Analog Organic Layer, Procedural Texture Bus & SIMD (DSP CORE FROZEN)
+- **Upgrades Implemented (15 files, 0 warnings in `Source/`, RT-safety & portability audit clean):**
+  - **Precision Modulation & Odd-Block Invariance (`PluginProcessor.{h,cpp}`, `Voice.h`, `Modulation.h`, `Shape.h`, `Sources.h`, `Ruin.h`, `Space.h`, `Pressure.h`, `Resonator.h`):** Fixed `kControlStep=8` (6 kHz @48k) inner modulation grid + `kChunk=64` outer bus cadence indexed by absolute sample counters (`samplePos`), zero-virtual raw-atomic `smoothControls`, QA-resettable deterministic PRNG (`setQaDeterministicSeed`), validated C++20 `std::bit_cast` fast transcendentals (`fastExp2`/`fastLog2`/`fastSin01`: max `0.141 ct` / `0.00073 dB`), sample-rate-invariant `LogSmooth`/`DbSmooth`, RC exponential `Adsr` with VCA CV buffer, 4.0 ms raised-cosine voice-steal de-click, smooth `1/sqrt(N)` polyphonic headroom scaling, and post-voice 64-bit 4th-order 12 Hz Butterworth DC hygiene (`-0.003 dB` @30 Hz).
+  - **V2 Dark Analog Organic Layer & Procedural Texture Bus (`Organic.h`, `Voice.h`, `Parameters.{h,cpp}`):** Appended 7 zero-default V2 DSP params (`v2_organic_amt`, `v2_organic_floor`, `v2_organic_mono`, `v2_tex_mode`, `v2_tex_mix`, `v2_tex_tone`, `v2_tex_drive`) preserving all 348 V1 IDs/indices. Per-voice 3-octave `1/f` `PinkDrift` (sub-120 Hz bass-locked) + bus chassis/tape micro-instability + voice-gated thermal floor + dedicated LR4 sub-120 Hz mono anchor; 3-mode 100% procedural texture bus (`Tape Air`, mono `Sub Weight`, 6-mode `Metal Exciter`), bypassed at `0%` mix with `0` latency and `-300.0 dBFS` odd-block invariance when active.
+  - **16-Voice Portable SoA SIMD (`Voice.h`, `Common.h`, `Wavetable.h`):** Scaled `kVoices` `8 -> 16`; 8-lane ILP register-tiled branchless 64-bit `LadderBank::processSoA` with steady-state coefficient hoisting, pre-resolved `WavetableBank::ResolvedSlice` Hermite reads, and portable `juce::dsp::SIMDRegister<float>` `LinearPhase4xOs` FIR stages; silent-tail `voiceOs` sleep (`0.262%` idle RT).
+
+| Gate | Frozen Stage 3B Result (Release `-O3`, 16 Voices) | Target | Status |
+|---|---|---|---|
+| 1 | `worstC6=-89.3`, `worstC7=-87.7`, `worstFM=-87.0 dBc` | `<-80` C6, `<-75` C7, `<-70` FM | **PASS** |
+| 2 | Saw C4 `18314 Hz` @48/96k (`0.00 dB` droop); ADSR `0.44 ms`, Proc `0.54 ms` (`1.00x`) | `>=18 kHz`, `90%` in attack | **PASS** |
+| 3 | ADAA `F1'/F2' maxErr=0.0000000`, `contErr=0.000000`; Tube `-66.8..-65.6` (`58–59 dB` supp); Clip `-76.4` (`54.6 dB`); DC `<-143.7` | `<1e-5`; `<-80`/`>=20 dB`; DC `<-90` | **PASS** |
+| 4 | 1 kHz mod 44.1..192k `svfPk=0.44, ladPk=0.29` (0 NaN); SVF `0.02 ct`, Lad `0.29 ct`; rateDiff `0.479 dB` | Bounded; `±5`/`±15 ct`; `±0.5 dB` | **PASS** |
+| 5 | Odd-block **`-300.0 dBFS`**, rate-switch **`-300.0 dBFS`**, PDC active **`209/209`**, bypass **`0/0`** | `<-100 dBFS`, `0` err, `0` bypass | **PASS** |
+| 6 | Steal **`2.44x`**, DC **`-115.2 dBFS`**, 10s tail **`-300.0 dBFS`**, voices **`0`**, idle CPU **`0.262%` RT** | `<=5x`, `<-90`, `<-120`, `0`, `<0.5%` | **PASS** |
+| 7 | `16/96` V1 presets finite (`0` NaN), `minSub120Corr=0.997` (frozen snapshot `build/vessel2_qa/v1_preset_frozen_3b.csv`) | Finite, `±0.05 dB` vs frozen S3B | **PASS** |
+| 8 | **16/16 voices** stress @48k: median **`1357.9 µs` (`12.73%` RT)**, p95 **`1455.3 µs` (`13.64%` RT)** | `<15.0%` RT @ 16 voices | **PASS** |
+
+- **Additional Verification:** `Vessel2QA --strict` = **`PASS=8 FAIL=0 PENDING=0`**; `HostProbe` on `VESSEL.vst3` = **`PASSED`** (21/21, 2437 exposed params, latency 209); fast-math & V2 Organic/Texture checks (`oddBlockRes=-300.0 dBFS` across modes 0/1/2) = **`OK`**.
+- **Frozen DSP Core File List (DO NOT MODIFY math in Stages 4–7):**
+  - `Source/dsp/Common.h`, `Source/dsp/Wavetable.h`, `Source/dsp/Wavetable.cpp`, `Source/dsp/Tables.h`, `Source/dsp/Tables.cpp`, `Source/dsp/TableList.h`, `Source/dsp/Voice.h`, `Source/dsp/Modulation.h`, `Source/dsp/Sources.h`, `Source/dsp/Ruin.h`, `Source/dsp/Shape.h`, `Source/dsp/Resonator.h`, `Source/dsp/Space.h`, `Source/dsp/Pressure.h`, `Source/dsp/Organic.h`.
+- **Stage 3B Status:** `PASS — DSP CORE FROZEN`. **Next:** `Stage 4`.

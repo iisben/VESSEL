@@ -210,9 +210,13 @@ public:
         preS.prepare (sr, 60.0f); preS.snap (std::max (1.0f, 30.0f * 0.001f * sr));
         mixS.prepare (sr, 30.0f); mixS.snap (0.0f);
         cleared = false;
+        ctrlPrimed = false;
+        ctrlTickCount = 0;
+        lastDamp = lastLowCut = lastDecay = lastMod = lastSizeQ = -1.0f;
+        lastInf = false;
     }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true)
     {
         mixS.set (p.on ? p.mix : 0.0f);
         if (! p.on && mixS.cur < 1.0e-4f)
@@ -236,30 +240,58 @@ public:
 
         sizeS.set (0.25f + 2.3f * p.size * p.size);
         const float scale = sr / 48000.0f;
-        const float dampHz = 18000.0f * std::pow (0.07f, p.damp);
-        for (auto& d : damp) d.setCutoff (dampHz, sr);
-        inHp[0].setup (p.lowCut, 0.7f, sr); inHp[1].setup (p.lowCut, 0.7f, sr);
         const float modDepth = p.mod * 0.0024f * sr;
 
-        // Constant-loudness tail: steady-state FDN energy grows as 1/(1-g²), so scale the wet by sqrt(1-g²),
-        // referenced to an 8 s hall. Long decays no longer swamp the mix; short rooms are not starved.
-        const float meanLen = 2744.0f * scale * sizeS.target;
-        const float gMean = std::pow (10.0f, -3.0f * meanLen / (std::max (0.3f, p.decay) * sr));
-        const float wetNorm = p.infinite ? 0.6f : juce::jlimit (0.35f, 1.6f, std::sqrt (1.0f - gMean * gMean) / 0.36f);
-
-        // Control rate: per-line loop gain (from each line's mean length) and the modulation rotors.
-        // The loop gain varies by < 0.1 dB across the modulation excursion, so per-chunk is exact enough,
-        // and it removes 8 pow() calls per sample.
-        alignas (32) float g[kLines], rc[kLines], rs[kLines];
-        for (int k = 0; k < kLines; ++k)
+        if (isCtrlTick || ! ctrlPrimed)
         {
-            const float len = kBase[k] * scale * sizeS.cur + modDepth + 2.0f;
-            g[k] = p.infinite ? 1.0f : std::pow (10.0f, -3.0f * len / (std::max (0.3f, p.decay) * sr));
-            const float w = kTwoPi * (0.07f + 0.05f * (float) k) * (0.3f + p.mod) / sr;
-            rc[k] = std::cos (w); rs[k] = std::sin (w);
-            const float norm = 1.0f / std::sqrt (lfoC[k] * lfoC[k] + lfoS[k] * lfoS[k]);   // keep the rotors on the unit circle
-            lfoC[k] *= norm; lfoS[k] *= norm;
+            const bool paramsChanged = ! ctrlPrimed
+                || std::abs (p.damp - lastDamp) > 1.0e-5f
+                || std::abs (p.lowCut - lastLowCut) > 1.0e-3f
+                || std::abs (p.decay - lastDecay) > 1.0e-5f
+                || std::abs (p.mod - lastMod) > 1.0e-5f
+                || std::abs (sizeS.cur - lastSizeQ) > 1.0e-4f
+                || p.infinite != lastInf;
+
+            if (paramsChanged)
+            {
+                if (! ctrlPrimed || std::abs (p.damp - lastDamp) > 1.0e-5f)
+                {
+                    const float dampHz = 18000.0f * std::pow (0.07f, p.damp);
+                    for (auto& d : damp) d.setCutoff (dampHz, sr);
+                }
+                if (! ctrlPrimed || std::abs (p.lowCut - lastLowCut) > 1.0e-3f)
+                {
+                    inHp[0].setup (p.lowCut, 0.7f, sr); inHp[1].setup (p.lowCut, 0.7f, sr);
+                }
+                const float meanLen = 2744.0f * scale * sizeS.target;
+                const float gMean = std::pow (10.0f, -3.0f * meanLen / (std::max (0.3f, p.decay) * sr));
+                wetNormC = p.infinite ? 0.6f : juce::jlimit (0.35f, 1.6f, std::sqrt (1.0f - gMean * gMean) / 0.36f);
+
+                for (int k = 0; k < kLines; ++k)
+                {
+                    const float len = kBase[k] * scale * sizeS.cur + modDepth + 2.0f;
+                    gC[k] = p.infinite ? 1.0f : std::pow (10.0f, -3.0f * len / (std::max (0.3f, p.decay) * sr));
+                    const float w = kTwoPi * (0.07f + 0.05f * (float) k) * (0.3f + p.mod) / sr;
+                    rcC[k] = std::cos (w); rsC[k] = std::sin (w);
+                }
+                lastDamp = p.damp; lastLowCut = p.lowCut; lastDecay = p.decay;
+                lastMod = p.mod; lastSizeQ = sizeS.cur; lastInf = p.infinite;
+                ctrlPrimed = true;
+            }
+            // Renormalize rotors every 8 control ticks (64 samples) — keeps unit-circle invariant & cuts sqrt 8x
+            if ((ctrlTickCount++ & 7u) == 0u)
+            {
+                for (int k = 0; k < kLines; ++k)
+                {
+                    const float norm = 1.0f / std::sqrt (lfoC[k] * lfoC[k] + lfoS[k] * lfoS[k]);
+                    lfoC[k] *= norm; lfoS[k] *= norm;
+                }
+            }
         }
+        const float wetNorm = wetNormC;
+        const float* g = gC;
+        const float* rc = rcC;
+        const float* rs = rsC;
         const float hn = 1.0f / std::sqrt ((float) kLines);
 
         for (int i = 0; i < n; ++i)
@@ -330,7 +362,11 @@ private:
     std::array<DelayLine, kLines> lines;
     std::array<OnePole, kLines> damp;
     float lfoC[kLines] {}, lfoS[kLines] {};
-    bool cleared = false;
+    alignas (32) float gC[kLines] {}, rcC[kLines] {}, rsC[kLines] {};
+    float wetNormC = 1.0f;
+    float lastDamp = -1.0f, lastLowCut = -1.0f, lastDecay = -1.0f, lastMod = -1.0f, lastSizeQ = -1.0f;
+    uint32_t ctrlTickCount = 0;
+    bool cleared = false, ctrlPrimed = false, lastInf = false;
     DelayLine diff[2][4], pre[2];
     Svf inHp[2];
     Smooth sizeS, preS, mixS;
@@ -355,6 +391,11 @@ public:
     void process (float* l, float* r, int n, bool on, float timeMs, float width, float xover)
     {
         widthS.set (on ? width : 0.0f);
+        if (! on && std::abs (widthS.cur) < 1.0e-5f)
+        {
+            widthS.snap (0.0f);
+            return;
+        }
         timeS.set (std::max (0.1f, timeMs) * 0.001f * sr);
         hp.setup (xover, 0.7f, sr);
         for (int i = 0; i < n; ++i)

@@ -33,6 +33,8 @@ const ParamSpec& spec (int pid) noexcept { return kSpecs[pid]; }
 
 Stage stageOf (int pid) noexcept
 {
+    if (pid >= v2_tex_mode && pid <= v2_tex_drive) return Stage::Source;
+    if (pid >= v2_organic_amt && pid <= v2_organic_mono) return Stage::Voice;
     if (isResonatorParam (pid)) return Stage::Shape;   // appended after the mod block, but lives in SHAPE
     if (pid == wt_table || isFmParam (pid)) return Stage::Source;
     if (pid >= lfo1_shape) return Stage::Mod;   // LFOs and the expression routing
@@ -77,6 +79,10 @@ const std::vector<int>& modDestinations()
                 v.push_back (i);
         // then FM
         for (int i = fm_on; i <= fm_key; ++i)
+            if (kSpecs[i].type == PType::Float)
+                v.push_back (i);
+        // then V2 Organic & Procedural Texture parameters (append-only)
+        for (int i = v2_organic_amt; i <= v2_tex_drive; ++i)
             if (kSpecs[i].type == PType::Float)
                 v.push_back (i);
         return v;

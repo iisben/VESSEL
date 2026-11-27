@@ -20,27 +20,36 @@ public:
         for (auto* f : { &xA, &xB, &apC }) { f->prepare (spec); f->reset(); }
         for (auto& e : env) e.reset();
         lastGainDb = { 0, 0, 0 };
+        sampleCount = 0;
+        lastLox = lastHix = lastTime = -1.0f;
         for (auto& r : bandR) r.reset();
         inGR.reset(); outGR.reset(); depthR.reset(); upR.reset(); downR.reset();
     }
 
     std::array<float, 3> bandGainDb() const noexcept { return lastGainDb; }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! p.on) { lastGainDb = { 0, 0, 0 }; return; }
-        const float maxFc = std::max (40.0f, 0.45f * sr);
-        const float lox = std::clamp (p.lox, 20.0f, maxFc * 0.5f);
-        const float hix = std::clamp (std::max (p.hix, lox * 2.0f), lox * 1.5f, maxFc);
-        xA.setCutoffFrequency (lox);
-        xB.setCutoffFrequency (hix);
-        apC.setCutoffFrequency (hix);
+        if (isCtrlTick)
+        {
+            const float maxFc = std::max (40.0f, 0.45f * sr);
+            const float lox = std::clamp (p.lox, 20.0f, maxFc * 0.5f);
+            const float hix = std::clamp (std::max (p.hix, lox * 2.0f), lox * 1.5f, maxFc);
+            if (std::abs (lox - lastLox) > 1.0e-3f) { lastLox = lox; xA.setCutoffFrequency (lox); }
+            if (std::abs (hix - lastHix) > 1.0e-3f) { lastHix = hix; xB.setCutoffFrequency (hix); apC.setCutoffFrequency (hix); }
 
-        static constexpr float att[3] { 12.0f, 6.0f, 2.5f }, rel[3] { 170.0f, 110.0f, 70.0f };
-        for (int b = 0; b < 3; ++b) env[b].setTimes (att[b] * p.time, rel[b] * p.time, sr);
-        bandR[0].to (p.lowDb, n); bandR[1].to (p.midDb, n); bandR[2].to (p.highDb, n);
-        inGR.to (dbToGain (p.inDb), n); outGR.to (dbToGain (p.outDb), n);
-        depthR.to (p.depth, n); upR.to (p.up, n); downR.to (p.down, n);
+            if (std::abs (p.time - lastTime) > 1.0e-5f)
+            {
+                lastTime = p.time;
+                static constexpr float att[3] { 12.0f, 6.0f, 2.5f }, rel[3] { 170.0f, 110.0f, 70.0f };
+                for (int b = 0; b < 3; ++b) env[b].setTimes (att[b] * p.time, rel[b] * p.time, sr);
+            }
+            bandR[0].to (p.lowDb, ctrlSpan); bandR[1].to (p.midDb, ctrlSpan); bandR[2].to (p.highDb, ctrlSpan);
+            inGR.to (dbToGain (p.inDb), ctrlSpan); outGR.to (dbToGain (p.outDb), ctrlSpan);
+            depthR.to (p.depth, ctrlSpan); upR.to (p.up, ctrlSpan); downR.to (p.down, ctrlSpan);
+        }
 
         for (int i = 0; i < n; ++i)
         {
@@ -60,6 +69,7 @@ public:
             }
 
             float outL = 0.0f, outR = 0.0f;
+            const bool meterTick = ((sampleCount++ & 31u) == 0u);
             for (int b = 0; b < 3; ++b)
             {
                 const float lev = gainToDb (env[b].process (std::max (std::abs (band[b][0]), std::abs (band[b][1]))));
@@ -71,7 +81,7 @@ public:
                     g += std::min (24.0f, (kUpThr - lev) * (1.0f - 1.0f / 3.0f)) * upA * gate;
                 }
                 g = g * depth + bandG[b];
-                if ((i & 31) == 0) lastGainDb[(size_t) b] = g;
+                if (meterTick) lastGainDb[(size_t) b] = g;
                 const float gl = dbToGain (g);
                 outL += band[b][0] * gl;
                 outR += band[b][1] * gl;
@@ -83,7 +93,8 @@ public:
 
 private:
     static constexpr float kDownThr = -22.0f, kUpThr = -38.0f;
-    float sr = 48000.0f;
+    float sr = 48000.0f, lastLox = -1.0f, lastHix = -1.0f, lastTime = -1.0f;
+    uint64_t sampleCount = 0;
     juce::dsp::LinkwitzRileyFilter<float> xA, xB, apC;
     EnvFollower env[3];
     std::array<float, 3> lastGainDb {};
@@ -99,6 +110,7 @@ public:
     void prepare (float sampleRate, int maxBlock)
     {
         sr = sampleRate;
+        lastFc = -1.0f;
         juce::dsp::ProcessSpec spec { (double) sampleRate, (juce::uint32) maxBlock, 1 };
         side.prepare (spec); side.reset();
         mid.prepare (spec);  mid.reset();
@@ -108,8 +120,12 @@ public:
     {
         if (! on) return;
         const float fc = std::clamp (freq, 20.0f, std::max (25.0f, 0.45f * sr));
-        side.setCutoffFrequency (fc);
-        mid.setCutoffFrequency (fc);
+        if (std::abs (fc - lastFc) > 1.0e-3f)
+        {
+            lastFc = fc;
+            side.setCutoffFrequency (fc);
+            mid.setCutoffFrequency (fc);
+        }
         for (int i = 0; i < n; ++i)
         {
             const float m = 0.5f * (l[i] + r[i]), s = 0.5f * (l[i] - r[i]);
@@ -123,7 +139,7 @@ public:
     }
 
 private:
-    float sr = 48000.0f;
+    float sr = 48000.0f, lastFc = -1.0f;
     juce::dsp::LinkwitzRileyFilter<float> side, mid;
 };
 
@@ -138,11 +154,13 @@ public:
     void trigger() noexcept { pump = 1.0f; }
     float currentGain() const noexcept { return lastGain; }
 
-    void process (float* l, float* r, const float* key, int n, bool on, int mode, float depth, float releaseMs)
+    void process (float* l, float* r, const float* key, int n, bool on, int mode, float depth, float releaseMs,
+                  bool isCtrlTick = true, int ctrlSpan = 0)
     {
-        depthR.to (on ? depth : 0.0f, n);
+        if (ctrlSpan <= 0) ctrlSpan = n;
+        if (isCtrlTick) depthR.to (on ? depth : 0.0f, ctrlSpan);
         if (! on && depthR.cur <= 0.0f) { pump = 0.0f; env.reset(); lastGain = 1.0f; return; }
-        env.setTimes (1.0f, releaseMs, sr);
+        if (isCtrlTick) env.setTimes (1.0f, releaseMs, sr);
         const float pumpCoef = std::exp (-1.0f / (0.001f * releaseMs * sr));
         for (int i = 0; i < n; ++i)
         {
@@ -378,12 +396,13 @@ public:
     bool truePeak = true;
     TruePeakCeiling tp;
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! osActive && ! p.excOn && ! p.clipOn)
         {
             // True 0-latency 1x bypass path (ramped output gain only)
-            gainR.to (dbToGain (p.gainDb), n);
+            if (isCtrlTick) gainR.to (dbToGain (p.gainDb), ctrlSpan);
             for (int i = 0; i < n; ++i)
             {
                 const float g = gainR.next();
@@ -407,15 +426,19 @@ public:
 
         os.processUp (l, r, n);
         const int m = n * 4;
+        const int mCtrl = ctrlSpan * 4;
         float* ul = os.upL();
         float* ur = os.upR();
 
-        gainR.to (dbToGain (p.gainDb), m);
-        ceilR.to (dbToGain (p.ceilingDb), m);
         const double k = 1.0 + (double) p.excHarm * 9.0;
-        amtR.to (p.excAmount * 1.4f / std::sqrt ((float) k), m);
         const bool excLive = p.excOn || ! excFade.settled (p.excOn);
-        if (excLive) for (int c = 0; c < 2; ++c) { pre[c].setup (p.excFreq, 0.7, osr); post[c].setup (p.excFreq, 0.7, osr); }
+        if (isCtrlTick)
+        {
+            gainR.to (dbToGain (p.gainDb), mCtrl);
+            ceilR.to (dbToGain (p.ceilingDb), mCtrl);
+            amtR.to (p.excAmount * 1.4f / std::sqrt ((float) k), mCtrl);
+            if (excLive) for (int c = 0; c < 2; ++c) { pre[c].setup (p.excFreq, 0.7, osr); post[c].setup (p.excFreq, 0.7, osr); }
+        }
         const bool clipLive = p.clipOn || ! clipFade.settled (p.clipOn);
         int hits = 0;
 
