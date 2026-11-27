@@ -1,7 +1,7 @@
 # VESSEL II — Engineering & QA Ledger
 
-- **Current Stage:** `Stage 3B: PASS — DSP CORE FROZEN`
-- **Next Stage:** `Stage 4`
+- **Current Stage:** `Stage 4: PASS`
+- **Next Stage:** `Stage 5`
 - **Branch:** `feat/vessel-v2-namm` (initialized from V1.0.1 baseline on `main`; no git remote configured yet)
 - **DSP Core Freeze:** `FROZEN` (after Stage 3B — do not modify frozen DSP math files in Stages 4–7)
 
@@ -163,3 +163,18 @@
 - **Frozen DSP Core File List (DO NOT MODIFY math in Stages 4–7):**
   - `Source/dsp/Common.h`, `Source/dsp/Wavetable.h`, `Source/dsp/Wavetable.cpp`, `Source/dsp/Tables.h`, `Source/dsp/Tables.cpp`, `Source/dsp/TableList.h`, `Source/dsp/Voice.h`, `Source/dsp/Modulation.h`, `Source/dsp/Sources.h`, `Source/dsp/Ruin.h`, `Source/dsp/Shape.h`, `Source/dsp/Resonator.h`, `Source/dsp/Space.h`, `Source/dsp/Pressure.h`, `Source/dsp/Organic.h`.
 - **Stage 3B Status:** `PASS — DSP CORE FROZEN`. **Next:** `Stage 4`.
+
+---
+
+## Stage 4 — Flagship Performance, Expression & V2 Preset Engine (Control Plane Only)
+- **Frozen DSP Audit:** `git diff Source/dsp/` = **0 lines changed** (DSP core strictly untouched).
+- **Control-Plane Additions (9 files, 0 warnings in `Source/` & `tools/`, RT-safety & cross-platform audit clean):**
+  - **Append-Only V2 Control Params (`Parameters.{h,cpp}`):** Appended 22 legacy-preserving control params (`v2_xy_x/y=0.5`, `v2_xy_{x,y}_{dest,amt}{1,2}`, `v2_mpe_on=0`, `v2_mpe_bend=48`, `v2_pb_range=2`, `v2_vel_curve=0`, `v2_slide_{dest,amt}{1,2}`, `v2_breath_{dest,amt}{1,2}`); all 348 V1 IDs & `modDestinations()` indices unchanged.
+  - **Hero Macros & XY Sculptor (`PluginProcessor.{h,cpp}`):** `kHeroMacros=4` (`macro1..4`, 6 bipolar routes each across V1 + V2 organic/texture/FX targets, `heroMacroLabel` custom captions); lock-free bipolar `applyXy()` centered at `(0.5, 0.5)` with 20 ms sample-rate-invariant smoothing and custom `xyLabelX/Y`.
+  - **MPE, Expression & Lock-Free MIDI CC Learn (`MidiLearn.h`, `PluginProcessor.{h,cpp}`, `ui/Controls.cpp`):** Per-voice MPE (Lower Zone Ch 1 Master / Ch 2–16 Member, ±48 st Pitch Bend, CC74 Slide, Channel Pressure with release latching) + Polyphonic Aftertouch + Channel AT + Mod Wheel (CC1) + Breath (CC2) + 5 Velocity Curves (`Linear|Soft|Hard|S-Curve|Fixed`); lock-free 128-CC `MidiLearnMap` with audio-thread capture/override, message-thread UI sync, right-click menu hooks, and portable `<userAppData>/VESSEL_II/midi_learn.xml` persistence.
+  - **Pro Studio Workflow & V2 Preset Manager (`Presets.{h,cpp}`, `PluginProcessor.{h,cpp}`, `ui/Controls.cpp`):** Click-free A/B State Compare + `copyAToB()`/`copyBToA()`; `juce::UndoManager` wired to APVTS + all UI attachments (`undo/redo/beginUndoTransaction/flushUndoState`); versioned `version="2"` `<VesselPreset>` & `<VESSEL>` state schema with User Presets/Favorites/Search under `<userAppData>/VESSEL_II/` and lossless V1->V2 migration resetting omitted V2 params to legacy defaults.
+- **Verification (Release `-O3`):**
+  - `Vessel2QA --strict --compare-v1 build/vessel2_qa/v1_preset_frozen_3b.csv --stage4-qa` = **`PASS=9 FAIL=0 PENDING=0`** (Gates 1–6 unchanged, Gate 7 V1 regression `maxRegress=0.008 dB <= 0.05 dB`, Gate 8 `16v` median `12.46%` RT / p95 `13.27%` RT, Gate 6 idle `0.300%` RT).
+  - Stage 4 Control-Plane QA (`7/7 OK`): Hero Macros (`229 -> 1918 / 79 Hz`), XY (`centerDiff=-300.0 dBFS`, `oddRes=-300.0 dBFS`), MPE (`Ch2=523.2 Hz [0.0 ct]` / `Ch3=392.0 Hz [0.1 ct]`, isolated CC74 Slide / Poly AT / Breath / 5 Vel curves), MIDI CC Learn (`CC21->flt_a_cut`, disk round-trip), A/B (`trans2ndDiff=0.0123 <= steady 0.0131`), Undo/Redo (`9000->4000->500->4000->9000`), V2 Preset round-trip & V1->V2 migration (`maxRMSdiff=0.0000 dB`).
+  - `HostProbe` on `VESSEL.vst3` = **`PASSED`** (21/21, 2459 exposed params, latency 209 samples).
+- **Stage 4 Status:** `PASS`. **Next:** `Stage 5`.

@@ -2,7 +2,9 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
+#include "MidiLearn.h"
 #include "Parameters.h"
+#include "Presets.h"
 #include "dsp/Common.h"
 #include "dsp/Voice.h"
 #include "dsp/Sources.h"
@@ -26,7 +28,9 @@ struct Telemetry
     std::atomic<float> lfoValue[vessel::kNumLfos] { { 0 }, { 0 }, { 0 } };
     std::atomic<float> lfoPhase[vessel::kNumLfos] { { 0 }, { 0 }, { 0 } };
     std::atomic<int>   clipCount { 0 };
-    std::atomic<float> modWheel { 0 }, aftertouch { 0 }, velocity { 0 };   // live expression sources
+    std::atomic<float> modWheel { 0 }, aftertouch { 0 }, velocity { 0 }, breath { 0 }, slide { 0 };   // live expression sources
+    std::atomic<float> xyX { 0.5f }, xyY { 0.5f };
+    std::atomic<bool>  mpeActive { false };
     std::atomic<bool>  grainLooping { false };
     std::array<std::atomic<float>, vessel::NUM_PARAMS> modOffset {};   // live normalised modulation per parameter
 
@@ -83,9 +87,12 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
-    // ── editor-facing API
+    // ── editor-facing API (undoManager declared before apvts for destruction order)
+    juce::UndoManager undoManager;
     juce::AudioProcessorValueTreeState apvts;
     Telemetry telemetry;
+    vessel::MidiLearnMap midiLearn;
+    vessel::PresetManager presetManager;
     std::array<vessel::dsp::WarpedLfo::Table, vessel::kNumLfos> drawTables;
 
     juce::RangedAudioParameter* param (int pid) const noexcept { return params[(size_t) pid]; }
@@ -93,6 +100,9 @@ public:
     juce::String userImpulseName() const;
     void randomiseDrawTable (int lfo);
     void applyPreset (const vessel::FactoryPreset&);
+    vessel::FactoryPreset captureCurrentPreset (const juce::String& name, const juce::String& author = "User",
+                                                const juce::String& category = "User", const juce::String& tags = {},
+                                                const juce::String& description = {}, bool favorite = false) const;
     /** Evaluates an LFO's shape for the UI preview. */
     float previewLfo (int lfo, float phase) const;
     /** The wavetable the voices play now (the built-in one until a selected table has finished loading). */
@@ -105,24 +115,90 @@ public:
 
     /** Macro names (message thread; saved with the state and set by presets). An empty name shows "Macro n". */
     juce::String macroName (int m) const;
+    juce::String heroMacroLabel (int m) const;
     void setMacroName (int m, const juce::String&);
     /** Bumped whenever a name changes, so the editor knows to repaint. */
     std::atomic<int> macroNamesVersion { 0 };
+
+    // ── XY Sculptor metadata & control
+    juce::String xyLabelX() const;
+    juce::String xyLabelY() const;
+    void setXyLabels (const juce::String& xLabel, const juce::String& yLabel);
+    void setXyPosition (float x01, float y01);
+
+    // ── Current preset metadata (V2 schema)
+    juce::String currentPresetName() const;
+    juce::String currentPresetAuthor() const;
+    juce::String currentPresetCategory() const;
+    juce::String currentPresetTags() const;
+    juce::String currentPresetDescription() const;
+    bool currentPresetFavorite() const;
+
+    // ── A/B State Compare + Copy A->B (smooth click-free transition)
+    int activeABSlot() const noexcept { return activeAB.load (std::memory_order_acquire); }
+    void setActiveABSlot (int slot);
+    void toggleAB() { setActiveABSlot (activeABSlot() == 0 ? 1 : 0); }
+    void copyAToB();
+    void copyBToA();
+    std::atomic<int> abStateVersion { 0 };
+
+    // ── Undo / Redo (wired to APVTS parameter edits)
+    void beginUndoTransaction (const juce::String& actionName = {});
+    void flushUndoState();
+    bool undo();
+    bool redo();
+    bool canUndo() const { return undoManager.canUndo(); }
+    bool canRedo() const { return undoManager.canRedo(); }
+    void clearUndoHistory() { undoManager.clearUndoHistory(); }
+
     /** The torch UI (the panel in the dark, the mouse a flashlight): saved with the session, off by default. */
     std::atomic<bool> torchOn { false };
 
 private:
+    struct ABSnapshot
+    {
+        std::array<float, vessel::NUM_PARAMS> normValues {};
+        std::array<juce::String, vessel::kNumMacros> macroNames {};
+        juce::String xyX { "TIMBRE" }, xyY { "SPACE" };
+        std::array<std::array<float, vessel::kDrawPoints>, vessel::kNumLfos> drawTables {};
+        juce::String presetName, presetAuthor, presetCategory, presetTags, presetDescription;
+        bool presetFavorite = false;
+        bool valid = false;
+    };
+
+    struct MpeChannelState
+    {
+        float bendRaw = 0.0f, bendS = 0.0f;
+        float slideRaw = 0.0f, slideS = 0.0f;
+        float pressRaw = 0.0f, pressS = 0.0f;
+    };
+
+    struct VoiceExprState
+    {
+        int note = -1;
+        int channel = 1;
+        bool gateHeld = false;
+        bool latched = false;
+        uint32_t age = 0;
+        float polyPressRaw = 0.0f, polyPressS = 0.0f;
+        float latchedBend = 0.0f, latchedSlide = 0.0f, latchedPress = 0.0f;
+    };
+
     void timerCallback() override;
     void refreshImpulseResponse (bool forceReload);
     void handleMidi (const juce::MidiMessage&);
-    void renderChunk (juce::AudioBuffer<float>& io, int start, int n, bool isCtrlTick, int ctrlSpan);
+    void renderChunk (juce::AudioBuffer<float>& io, int start, int n, bool isBusTick, int busSpan);
     void smoothControls (int n);
     void applyExpression();
     void applyMacros();
+    void applyXy();
     void buildVoiceParams();
     void snapToCurrentState();
     void resetDrawTables();
+    void resetExpressionState() noexcept;
     int  totalLatency() const;
+    ABSnapshot captureSnapshot() const;
+    void applySnapshotSmooth (const ABSnapshot& snap);
 
     /** Runs `process(bool on)` under a click-free bypass crossfade on the main x bus. */
     template <typename Fn> void faded (vessel::dsp::BypassFade&, bool on, int n, Fn&& process);
@@ -140,8 +216,17 @@ private:
     {
         return paramRanges[(size_t) pid].convertFrom0to1 (juce::jlimit (0.0f, 1.0f, base[(size_t) pid] + mod[(size_t) pid] + extra));
     }
-    bool pb (int pid) const noexcept { return rawParams[(size_t) pid]->load (std::memory_order_relaxed) > 0.5f; }
-    int  pc (int pid) const noexcept { return juce::roundToInt (rawParams[(size_t) pid]->load (std::memory_order_relaxed)); }
+    bool pb (int pid) const noexcept
+    {
+        if (ccTargetActive[(size_t) pid]) return ccTargetNorm[(size_t) pid] > 0.5f;
+        return rawParams[(size_t) pid]->load (std::memory_order_relaxed) > 0.5f;
+    }
+    int pc (int pid) const noexcept
+    {
+        if (ccTargetActive[(size_t) pid])
+            return juce::roundToInt (paramRanges[(size_t) pid].convertFrom0to1 (ccTargetNorm[(size_t) pid]));
+        return juce::roundToInt (rawParams[(size_t) pid]->load (std::memory_order_relaxed));
+    }
 
     static constexpr int kChunk = 64;
     static constexpr int kControlStep = vessel::dsp::VoiceManager::kControlStep;
@@ -157,6 +242,11 @@ private:
     std::array<float, vessel::NUM_PARAMS> busBase {};
     std::array<bool, vessel::NUM_PARAMS> smoothed {};     // continuous params get the 20 ms smoother
     std::vector<int> floatPids;                           // cached Float parameter indices for zero-virtual smoothing
+    std::array<float, vessel::NUM_PARAMS> ccTargetNorm {};
+    std::array<bool, vessel::NUM_PARAMS>  ccTargetActive {};
+    std::array<std::atomic<float>, vessel::NUM_PARAMS> ccSyncNorm {};
+    std::array<std::atomic<bool>, vessel::NUM_PARAMS>  ccSyncDirty {};
+    std::atomic<bool> ccAnySyncDirty { false };
     bool baseReady = false;
     bool midiDirty = false;
     bool voiceOsIdle = true;
@@ -168,8 +258,15 @@ private:
     int bodyQuietSamples = 0;
     std::atomic<bool> snapPending { true };               // set by prepare / setStateInformation, consumed on audio thread
 
-    // expression (audio thread): raw MIDI values and their smoothed versions
-    float mwRaw = 0, atRaw = 0, velRaw = 0, mwS = 0, atS = 0, velS = 0, bendRaw = 0, bendS = 0;
+    // expression (audio thread): raw MIDI values and their smoothed versions (global + MPE + per-voice)
+    float mwRaw = 0, atRaw = 0, velRaw = 0, mwS = 0, atS = 0, velS = 0;
+    float bendNormRaw = 0, bendNormS = 0;
+    float breathRaw = 0, breathS = 0, slideRaw = 0, slideS = 0, activeMaxPressS = 0;
+    int mpeMasterChannel = 1;
+    bool sustainHeld = false;
+    bool polyPressSeen = false;
+    std::array<MpeChannelState, 17> mpeCh {};
+    std::array<VoiceExprState, vessel::dsp::VoiceManager::kVoices> voiceExpr {};
 
     double sr = 48000.0;
     std::atomic<double> srAtomic { 48000.0 };
@@ -232,7 +329,12 @@ private:
     std::atomic<int> currentPreset { 0 };
     std::shared_ptr<std::atomic<bool>> aliveFlag = std::make_shared<std::atomic<bool>> (true);
     std::array<juce::String, vessel::kNumMacros> macroNames;
+    juce::String xyNameX { "TIMBRE" }, xyNameY { "SPACE" };
+    juce::String metaName { "Init Vessel" }, metaAuthor { "iisben" }, metaCategory { "Init" }, metaTags { "Clean|Static" }, metaDescription;
+    bool metaFavorite = false;
     juce::CriticalSection macroNameLock;
+    std::atomic<int> activeAB { 0 };
+    std::array<ABSnapshot, 2> abSlots {};
     float scopeDecim = 0.0f;
     float peakHoldL = 0.0f, peakHoldR = 0.0f;
 

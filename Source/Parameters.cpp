@@ -31,8 +31,16 @@ const char* kVowels[] = { "A", "E", "I", "O", "U" };
 
 const ParamSpec& spec (int pid) noexcept { return kSpecs[pid]; }
 
+int pidForId (const juce::String& id) noexcept
+{
+    for (int i = 0; i < NUM_PARAMS; ++i)
+        if (id == kSpecs[i].id) return i;
+    return -1;
+}
+
 Stage stageOf (int pid) noexcept
 {
+    if (isV2ControlParam (pid)) return Stage::Mod;
     if (pid >= v2_tex_mode && pid <= v2_tex_drive) return Stage::Source;
     if (pid >= v2_organic_amt && pid <= v2_organic_mono) return Stage::Voice;
     if (isResonatorParam (pid)) return Stage::Shape;   // appended after the mod block, but lives in SHAPE
