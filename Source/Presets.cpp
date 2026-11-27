@@ -68,7 +68,7 @@ int destIndexOf (int pid)
 
 const juce::StringArray& PresetBank::categoryOrder()
 {
-    static const juce::StringArray order { "Init", "Sub", "Bass", "Pad", "Drone", "Lead", "Keys", "Pluck", "Texture", "FX", "Cinematic" };
+    static const juce::StringArray order { "Init", "Sub", "Bass", "Pad", "Drone", "Lead", "Keys", "Pluck", "Texture", "FX", "Cinematic", "Club" };
     return order;
 }
 
@@ -200,7 +200,7 @@ PresetBank PresetBank::fromXml (const juce::XmlElement& root, juce::StringArray*
 
 namespace
 {
-struct LoadedBank { PresetBank bank; juce::StringArray errors; };
+struct LoadedBank { PresetBank bank; PresetBank v2Bank; juce::StringArray errors; };
 
 const LoadedBank& loadedFactory()
 {
@@ -210,6 +210,15 @@ const LoadedBank& loadedFactory()
         auto xml = juce::XmlDocument::parse (juce::String::fromUTF8 (BinaryData::FactoryBank_xml, BinaryData::FactoryBank_xmlSize));
         if (xml == nullptr) l.errors.add ("FactoryBank.xml does not parse");
         else l.bank = PresetBank::fromXml (*xml, &l.errors);
+
+        auto v2Xml = juce::XmlDocument::parse (juce::String::fromUTF8 (BinaryData::V2FlagshipBank_xml, BinaryData::V2FlagshipBank_xmlSize));
+        if (v2Xml == nullptr) l.errors.add ("V2FlagshipBank.xml does not parse");
+        else
+        {
+            l.v2Bank = PresetBank::fromXml (*v2Xml, &l.errors);
+            for (const auto& p : l.v2Bank.all())
+                l.bank.append (p);
+        }
         jassert (l.errors.isEmpty());
         return l;
     }();
@@ -235,6 +244,8 @@ const PresetBank& PresetBank::factory()
     }();
     return bank;
 }
+
+const PresetBank& PresetBank::v2Flagship() { return loadedFactory().v2Bank; }
 
 const juce::StringArray& PresetBank::factoryErrors() { return loadedFactory().errors; }
 
