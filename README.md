@@ -1,8 +1,6 @@
 # VESSEL
 
-I am still learning and using copilot to educate and assist me in learning JUCE. I will not release anything here without
-many hours of bug checks and testing. I will never charge a dime for anything I make until I have full capability of making 
-it the long way from the old world. 
+I am still learning, and I use Copilot to educate and assist me with JUCE. I will not release anything here without many hours of bug checks and testing. I will never charge a dime for anything I make until I have the full capability to build it the long way, from the old world.
 
 VESSEL is a dark synth and effects rack for scores, trailers, IDM and witch house. 
 
