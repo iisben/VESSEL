@@ -58,7 +58,7 @@ public:
                 x = x * (1.0f - 0.45f * b) + refl * b * 0.75f;
                 x = absorb[c].lowpass (x);
                 presence[c].tick (x);
-                x += presence[c].hp * (presG - 1.0f) * fr;
+                x += (float) presence[c].hp * (presG - 1.0f) * fr;
                 *io[c] = x * (1.0f + 0.2f * fr);
             }
         }

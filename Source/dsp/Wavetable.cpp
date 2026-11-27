@@ -42,11 +42,18 @@ void harmonic (int frame, int h, float& amp, float& ph)
         }
     }
 }
+
+void writeGuards (float* t) noexcept
+{
+    t[-1] = t[WavetableBank::kSize - 1];
+    t[WavetableBank::kSize] = t[0];
+    t[WavetableBank::kSize + 1] = t[1];
+}
 } // namespace
 
 WavetableBank::WavetableBank (int frames) : nFrames (std::max (1, frames))
 {
-    data.assign ((size_t) (nFrames * kMips * (kSize + 1)), 0.0f);
+    data.assign ((size_t) (nFrames * kMips * kStride), 0.0f);
 }
 
 std::unique_ptr<WavetableBank> WavetableBank::fromFrames (const float* frames, int numFrames)
@@ -66,14 +73,13 @@ std::unique_ptr<WavetableBank> WavetableBank::fromFrames (const float* frames, i
 
         for (int m = 0; m < kMips; ++m)
         {
-            // the same partial budget as the built-in table: harmonics 1..min(N/2 >> m, N/2 - 1)
-            const int maxH = std::min (std::max (1, (kSize / 2) >> m), kSize / 2 - 1);
+            const int maxH = maxHarmonicForMip (m);
             std::fill (buf.begin(), buf.end(), 0.0f);
             std::copy (spec.begin() + 2, spec.begin() + 2 * (maxH + 1), buf.begin() + 2);
             fft.performRealOnlyInverseTransform (buf.data());
             float* t = b->table (f, m);
             std::copy_n (buf.begin(), kSize, t);
-            t[kSize] = t[0];
+            writeGuards (t);
         }
     }
 
@@ -93,7 +99,7 @@ std::unique_ptr<WavetableBank> WavetableBank::fromFrames (const float* frames, i
 
 WavetableBank::WavetableBank()
 {
-    data.assign ((size_t) (kFrames * kMips * (kSize + 1)), 0.0f);
+    data.assign ((size_t) (kFrames * kMips * kStride), 0.0f);
 
     constexpr int order = 11;   // 2^11 = 2048
     juce::dsp::FFT fft (order);
@@ -104,10 +110,10 @@ WavetableBank::WavetableBank()
         float norm = 1.0f;
         for (int m = 0; m < kMips; ++m)
         {
-            const int maxH = std::max (1, (kSize / 2) >> m);
+            const int maxH = maxHarmonicForMip (m);
             std::fill (buf.begin(), buf.end(), 0.0f);
 
-            for (int h = 1; h < std::min (maxH + 1, kSize / 2); ++h)
+            for (int h = 1; h <= maxH; ++h)
             {
                 float a, ph;
                 harmonic (f, h, a, ph);
@@ -128,7 +134,7 @@ WavetableBank::WavetableBank()
                 norm = peak > 0.0f ? 0.9f / peak : 1.0f;
             }
             for (int i = 0; i < kSize; ++i) t[i] *= norm;
-            t[kSize] = t[0];   // guard sample for interpolation
+            writeGuards (t);   // cyclic guards [-1], [kSize], [kSize+1] for 4-point Hermite interpolation
         }
     }
 }

@@ -1,7 +1,7 @@
 # VESSEL II — Engineering & QA Ledger
 
-- **Current Stage:** `Stage 2: PASS`
-- **Next Stage:** `Stage 3A`
+- **Current Stage:** `Stage 3A: PASS`
+- **Next Stage:** `Stage 3B`
 - **Branch:** `feat/vessel-v2-namm` (initialized from V1.0.1 baseline on `main`; no git remote configured yet)
 - **DSP Core Freeze:** `NOT FROZEN` (freezes after Stage 3B)
 
@@ -117,3 +117,25 @@
 | 8 | Poly CPU Budget (`-O3`) | 8/8 voices stress @48k: median **`643.8 µs` (`6.04%` RT)**, p95 `670.5 µs` (`6.29%` RT) | `< 15.0%` RT (16 voices after Stage 3B) | **PASS** |
 
 - **Stage 2 Status:** `PASS` (4/8 baseline PASS, 4/8 baseline FAIL exposing exact Stage 3A/3B gaps, ADAA Part A `PENDING` until Stage 3A). **Next:** `Stage 3A`.
+
+---
+
+## Stage 3A — Flagship DSP Gap-Closure: Oscillators, 64-Bit ZDF Filters & ADAA
+- **Upgrades Implemented (9 files, 0 warnings in `Source/` & `Vessel2QA.cpp`, RT/portability audit clean):**
+  - **Oscillators & TZFM (`Wavetable.{h,cpp}`, `Voice.h`):** 3 mip tables/octave (`kMips=31`) FFT bank with cyclic guard samples + 4-point cubic Hermite interpolation + smooth cross-mip/cross-table morphing; 4-point cubic B-spline `polyBlep4`/`polyBlamp4` on PWM knees; double-precision Through-Zero FM (TZFM) with bidirectional `[0, 1)` phase wrapping + post-oscillator 64-bit `~5 Hz` `DcBlocker`; fixed `VoiceManager::snapFilter` idle-fade bug (Gate 2).
+  - **64-Bit TPT/ZDF Filters (`Common.h`, `Voice.h`, `Shape.h`, `Space.h`):** Upgraded `Svf` to 64-bit `double` Cytomic TPT/ZDF (`[10 Hz, 0.485*fs]` clamp + exact `tan()`); upgraded `LadderBank<L>` to 64-bit `double` SoA nonlinear 4-pole ZDF transistor ladder solved deterministically in 2 Newton-Raphson iterations from the linear ZDF pivot with 1-div Padé `[9/8]` `fastTanhLadder` + Taylor update + bass-loss compensation (`1 + 0.55k`); replaced `kPi` with C++20 `std::numbers::pi_v`.
+  - **Feedforward Double ADAA & Linear-Phase PDC (`Common.h`, `Ruin.h`, `Pressure.h`, `PluginProcessor.cpp`):** Implemented exact closed-form `double` `adaaF0/F1/F2` + ADAA2 (calibrated `eps2=1e-4` split-half kernel, zero sine-peak cancellation) for all 3 `TubeDrive` modes + 15 ms mode-switch crossfade + 1-sample phase-aligned dry mix + 64-bit `5 Hz` `DcBlocker` + smoother reset in `prepare()`; `double` ADAA1 Exciter + ADAA2 hard clipper in `OutputStage`; custom mirrored-ring Type-I linear-phase 4x Kaiser FIR (`LinearPhase4xOs`: `N1=95 fc=0.221 β=9.0`, `N2=27 fc=0.25 β=9.5`, `-74 dB @24.03k`, `-100 dB @26k`) + exact integer `pad4x` + synchronous `prepareToPlay` 0-latency bypass PDC.
+
+| Gate | Stage 3A Result (Release `-O3`) | Status |
+|---|---|---|
+| 1 | `worstC6=-89.3`, `worstC7=-87.7`, `worstFM=-88.1 dBc` (Saw C4 `-89.4`, Square C6 `-91.0`) | **PASS** |
+| 2 | Saw C4 `18314 Hz` @48/96k (`0.00 dB` droop); ADSR `0.46 ms`, Proc **`0.54 ms`** (`1.00x` step) | **PASS** |
+| 3 | ADAA `F1'/F2' maxErr=0.0000000`, `contErr=0.000000`; Tube `-66.8..-65.6 dBc` (`58–59 dB` supp); Clip **`-76.4 dBc`** (`54.6 dB` supp); DC `<-142 dBFS` | **PASS** |
+| 4 | 1 kHz mod 44.1..192k `svfPk=0.44, ladPk=0.29` (0 NaN); self-osc SVF `0.02 ct`, Lad `0.29 ct`; rateDiff `0.479 dB` | **PASS** |
+| 5 | Rate-switch **`-300.0 dBFS`** [OK], PDC active **`209/209`** [OK], PDC bypass **`0/0`** [OK]; odd-block `-80.7 dBFS` (Stage 3B) | *Partial (Stage 3B)* |
+| 6 | Idle CPU `0.694%`, steal `27.86x`, DC `-66.8 dBFS`, tail `-300 dBFS`, voices `0` (Stage 3B) | *Stage 3B* |
+| 7 | `16/96` V1 presets finite (`0` NaN), `minSub120Corr=0.996` | **PASS** |
+| 8 | 8/8 voices stress @48k: median **`1229.6 µs` (`11.53%` RT)**, p95 `12.06%` RT (`<15.0%` target) | **PASS** |
+
+- **Additional Verification:** `Vessel2QA --strict --gates 1,2,3,4,7,8` = `PASS=6 FAIL=0 PENDING=0`; `VesselLab`: Tube starved C6 `-92.1 dB` (`+31.6 dB`), Clipper C6 `-92.8 dB` (`+17.9 dB`), Sub send 50% `-0.048 dB` @55 Hz, TruePeak `-1.02 dBTP` (bit-exact below ceiling); `HostProbe` on `VESSEL.vst3` = `PASSED` (21/21).
+- **Stage 3A Status:** `PASS` (all 6 required Stage 3A gates PASS strictly + Gate 5 rate-switch & PDC PASS). **Next:** `Stage 3B`.

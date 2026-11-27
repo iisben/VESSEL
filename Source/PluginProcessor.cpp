@@ -126,7 +126,8 @@ void VesselProcessor::snapToCurrentState()
     convMixS.snap (pb (conv_on) ? pv (conv_mix) : 0.0f);
     resonator.snapModel (pc (res_model));
     voices.setMode (pc (voice_mode));   // before any note of the first block (a bounce starting on a note)
-    ruin.snapBias (pb (bias_on));
+    voices.snapFilter (pb (flt_on));
+    ruin.snap (pb (tube_on), pb (bias_on));
     outStage.snap (pb (exc_on), pb (clip_on));
 }
 
@@ -565,14 +566,16 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         faded (fCrush, pb (crush_on), n, [&] (bool on) { cp.on = on; crusher.process (xL.data(), xR.data(), n, cp); });
     }
 
-    // Clean sub re-joins, delayed by the RUIN block's low-frequency group delay (fractional, Hermite) so the
-    // sent and clean halves of the sub sum in phase: no cancellation at any send amount.
-    const float subDelay = ruin.latency() + 1.0f;
+    // Clean sub re-joins, delayed by the RUIN block's exact linear-phase latency (0 when RUIN is bypassed) so
+    // the sent and clean halves of the sub sum in phase: no cancellation at any send amount.
+    const float ruinLat = ruin.latency();
+    const float subDelay = ruinLat + 1.0f;
     float subLevelNow = 0.0f;
     for (int i = 0; i < n; ++i)
     {
         subAlign.push (subB[(size_t) i]);
-        const float s = subAlign.readHermite (subDelay) * cleanR.next();
+        const float cleanSrc = ruinLat > 0.0f ? subAlign.readHermite (subDelay) : subB[(size_t) i];
+        const float s = cleanSrc * cleanR.next();
         xL[(size_t) i] += s; xR[(size_t) i] += s;
         subLevelNow = std::max (subLevelNow, std::abs (s));
     }

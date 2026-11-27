@@ -5,77 +5,282 @@
 namespace vessel::dsp
 {
 //==============================================================================
-/** (6) Asymmetric thermionic drive. Runs inside RuinCore's 4x oversampled block. Three bias topologies after the
-    classic triode / pentode / bias-starved switch: soft even-order, hard odd-order, and sputtering crossover fuzz.
-    Every curve is smooth (no hard knees), so harmonics fall away fast and the 4x headroom contains them. */
+/** (6) Asymmetric thermionic drive with 64-bit double ADAA2 (2nd-order antiderivative antialiasing).
+    Runs inside RuinCore's 4x Type-I linear-phase FIR oversampled block. Three bias topologies after the
+    classic triode / pentode / bias-starved switch, each with exact closed-form F0, F1, and F2 antiderivatives,
+    calibrated midpoint fallbacks, 64-bit ~5 Hz DC blocking, 1-sample phase-aligned dry mix, and click-free
+    mode-switch crossfade. */
 class TubeDrive
 {
 public:
     struct Params { bool on = true; int mode = 0; float drive = 0.3f, bias = 0.15f, mix = 1.0f, outDb = 0.0f; };
 
+    static constexpr double kEps1 = 1.0e-5;
+    static constexpr double kEps2 = 1.0e-4;
+
     void prepare (float osRate)
     {
-        for (auto& d : dc) d.prepare (osRate);
-        driveS.prepare (osRate, 30.0f); biasS.prepare (osRate, 30.0f);
-        mixS.prepare (osRate, 20.0f); outS.prepare (osRate, 20.0f);
+        for (auto& d : dc) d.prepare ((double) osRate, 5.0);
+        driveS.prepare (osRate, 30.0f); driveS.snap (0.0f);
+        biasS.prepare (osRate, 30.0f);  biasS.snap (0.0f);
+        mixS.prepare (osRate, 20.0f);   mixS.snap (0.0f);
+        outS.prepare (osRate, 20.0f);   outS.snap (0.0f);
+        modeStep = 1.0f / std::max (1.0f, 0.015f * osRate);
+        resetState();
     }
 
-    /** In place at the oversampled rate. The dry reference for the blend is this function's own input, so dry and
-        wet pass through the identical up/down filters: a parallel blend cannot comb, whatever the filter phase. */
-    void process (float* l, float* r, int m, const Params& p)
+    void resetState() noexcept
     {
-        mixS.set (p.on ? p.mix : 0.0f);
-        if (! p.on && mixS.cur < 1.0e-4f) { mixS.snap (0.0f); return; }
-        driveS.set (p.drive); biasS.set (p.bias);
-        outS.set (dbToGain (p.outDb) / (1.0f + 1.6f * p.drive));
-
-        for (int i = 0; i < m; ++i)
+        for (auto& d : dc) d.reset();
+        for (int c = 0; c < 2; ++c)
         {
-            const float d = driveS.next(), b = biasS.next(), mx = mixS.next(), o = outS.next();
-            const float g = std::exp2 (d * 6.643856f);   // 0..40 dB
-            const float wl = dc[0].process (shape (l[i] * g, b, p.mode));
-            const float wr = dc[1].process (shape (r[i] * g, b, p.mode));
-            l[i] += mx * (wl * o - l[i]);
-            r[i] += mx * (wr * o - r[i]);
+            x1[c] = x2[c] = f1_1[c] = f2_1[c] = f2_2[c] = bPrev[c] = 0.0;
+            modePrev[c] = -1;
+            dryPrev[c] = 0.0f;
         }
+        curMode = oldMode = 0;
+        modeFade = 0.0f;
+        modePrimed = false;
     }
 
-    /** The static transfer curve (also used by the UI to draw it). */
-    static float shape (float x, float b, int mode) noexcept
+    /** Exact static transfer curve F0(x, b, mode) in 64-bit double. */
+    static double adaaF0 (double x, double b, int mode) noexcept
     {
         switch (mode)
         {
             case 0:   // triode: soft, asymmetric -> 2nd harmonic
             {
-                const float off = 0.45f * b;
-                return fastTanh (x + off) - fastTanh (off);
+                const double off = 0.45 * b;
+                return fastTanhD (x + off) - fastTanhD (off);
             }
-            case 1:   // pentode: harder knee, mostly odd
+            case 1:   // pentode: sharper knee, odd-dominant harmonic bite (exact F1 & F2)
             {
-                const float off = 0.15f * b;
-                auto clip = [] (float u) { const float a = std::abs (u); return u / std::pow (1.0f + a * a * std::sqrt (a), 0.4f); };
-                return clip (x + off) - clip (off);
+                constexpr double alpha = 0.40;
+                const double off = 0.15 * b;
+                auto base = [] (double u) noexcept
+                {
+                    const double t = fastTanhD (u);
+                    const double t2 = t * t;
+                    return t + alpha * t2 * t * (1.0 - t2);
+                };
+                return base (x + off) - base (off);
             }
-            default:  // starved: smooth crossover dead-zone (cubic near zero, linear beyond) + lopsided fuzz
+            default:  // starved: C^2 cubic crossover dead-zone + lopsided +1/-0.85 fuzz
             {
-                const float u = 1.5f * x + 0.5f * b;
-                const float thr = 0.10f + 0.22f * std::max (0.0f, -b);
-                const float v = u - thr * fastTanh (u / thr);
-                const float pos = fastTanh (2.2f * v), neg = 0.85f * fastTanh (0.8f * v);
-                const float s = 0.5f + 0.5f * fastTanh (v * 20.0f);   // C1 blend between the two half-curves
-                return neg + s * (pos - neg);
+                const double u = 1.5 * x + 0.5 * b;
+                const double thr = 0.10 + 0.22 * std::max (0.0, -b);
+                const double invDen = 1.0 / (1.0 + 2.0 * thr);
+                const bool pos = (u >= 0.0);
+                const double k = (pos ? 1.6 : 0.95) * invDen;
+                const double a = pos ? 1.0 : 0.85;
+                const double t = fastTanhD (k * u);
+                return a * t * t * t;
             }
         }
     }
 
+    /** Exact first antiderivative F1(x, b, mode) such that dF1/dx == adaaF0(x, b, mode). */
+    static double adaaF1 (double x, double b, int mode) noexcept
+    {
+        switch (mode)
+        {
+            case 0:
+            {
+                const double off = 0.45 * b;
+                return tanhF1 (x + off) - x * fastTanhD (off);
+            }
+            case 1:
+            {
+                constexpr double alpha = 0.40;
+                const double off = 0.15 * b;
+                const double t0 = fastTanhD (off);
+                const double t0_2 = t0 * t0;
+                const double c0 = t0 + alpha * t0_2 * t0 * (1.0 - t0_2);
+                const double u = x + off;
+                const double t = fastTanhD (u);
+                const double t2 = t * t;
+                return tanhF1 (u) + (0.25 * alpha) * t2 * t2 - x * c0;
+            }
+            default:
+            {
+                const double u = 1.5 * x + 0.5 * b;
+                const double thr = 0.10 + 0.22 * std::max (0.0, -b);
+                const double invDen = 1.0 / (1.0 + 2.0 * thr);
+                const bool pos = (u >= 0.0);
+                const double k = (pos ? 1.6 : 0.95) * invDen;
+                const double a = pos ? 1.0 : 0.85;
+                const double s = 1.5 * k;
+                const double w = k * u;
+                const double t = fastTanhD (w);
+                return (a / s) * (tanhF1 (w) - 0.5 * t * t);
+            }
+        }
+    }
+
+    /** Exact second antiderivative F2(x, b, mode) such that dF2/dx == adaaF1(x, b, mode). */
+    static double adaaF2 (double x, double b, int mode) noexcept
+    {
+        switch (mode)
+        {
+            case 0:
+            {
+                const double off = 0.45 * b;
+                return tanhF2 (x + off) - 0.5 * x * x * fastTanhD (off);
+            }
+            case 1:
+            {
+                constexpr double alpha = 0.40;
+                const double off = 0.15 * b;
+                const double t0 = fastTanhD (off);
+                const double t0_2 = t0 * t0;
+                const double c0 = t0 + alpha * t0_2 * t0 * (1.0 - t0_2);
+                const double u = x + off;
+                const double t = fastTanhD (u);
+                return tanhF2 (u) + (0.25 * alpha) * (u - t - (1.0 / 3.0) * t * t * t) - 0.5 * x * x * c0;
+            }
+            default:
+            {
+                const double u = 1.5 * x + 0.5 * b;
+                const double thr = 0.10 + 0.22 * std::max (0.0, -b);
+                const double invDen = 1.0 / (1.0 + 2.0 * thr);
+                const bool pos = (u >= 0.0);
+                const double k = (pos ? 1.6 : 0.95) * invDen;
+                const double a = pos ? 1.0 : 0.85;
+                const double s = 1.5 * k;
+                const double w = k * u;
+                const double t = fastTanhD (w);
+                return (a / (s * s)) * (tanhF2 (w) - 0.5 * (w - t));
+            }
+        }
+    }
+
+    /** 1st-order ADAA evaluation with calibrated midpoint fallback (exact continuity across |dx| ~ kEps1). */
+    static double adaa1Eval (double x, double xPrev, double b, int mode) noexcept
+    {
+        const double dx = x - xPrev;
+        if (std::abs (dx) > kEps1)
+            return (adaaF1 (x, b, mode) - adaaF1 (xPrev, b, mode)) / dx;
+        return adaaF0 (0.5 * (x + xPrev), b, mode);
+    }
+
+    /** 2nd-order ADAA split-half kernel (no division by x0 - x2 -> immune to sine-peak cancellation). */
+    static double adaa2Half (double a, double c, double fa2, double fc2, double fc1, double b, int mode) noexcept
+    {
+        const double d = a - c;
+        if (std::abs (d) > kEps2)
+            return (fa2 - fc2 - d * fc1) / (d * d);
+        return 0.5 * adaaF0 ((a + 2.0 * c) * (1.0 / 3.0), b, mode);
+    }
+
+    static double adaa2Eval (double x0, double x1v, double x2v, double b, int mode) noexcept
+    {
+        const double f1_1v = adaaF1 (x1v, b, mode);
+        const double f2_0v = adaaF2 (x0,  b, mode);
+        const double f2_1v = adaaF2 (x1v, b, mode);
+        const double f2_2v = adaaF2 (x2v, b, mode);
+        return adaa2Half (x0, x1v, f2_0v, f2_1v, f1_1v, b, mode)
+             + adaa2Half (x2v, x1v, f2_2v, f2_1v, f1_1v, b, mode);
+    }
+
+    /** The static transfer curve (also used by the UI and QA naive reference). */
+    static float shape (float x, float b, int mode) noexcept
+    {
+        return (float) adaaF0 ((double) x, (double) b, mode);
+    }
+
+    /** In place at the oversampled rate. Always preserves an exact 1-sample oversampled delay (matching ADAA2's
+        triangular kernel center at x[n-1]) so dry and wet stay 100% phase-aligned at every mix setting. */
+    void process (float* l, float* r, int m, const Params& p)
+    {
+        mixS.set (p.on ? p.mix : 0.0f);
+        if (! p.on && mixS.cur < 1.0e-4f)
+        {
+            mixS.snap (0.0f);
+            for (int i = 0; i < m; ++i)
+            {
+                const float dl = dryPrev[0]; dryPrev[0] = l[i]; l[i] = dl;
+                const float dr = dryPrev[1]; dryPrev[1] = r[i]; r[i] = dr;
+            }
+            return;
+        }
+        driveS.set (p.drive); biasS.set (p.bias);
+        outS.set (dbToGain (p.outDb) / (1.0f + 1.6f * p.drive));
+
+        if (! modePrimed) { curMode = oldMode = p.mode; modeFade = 0.0f; modePrimed = true; }
+        else if (p.mode != curMode) { oldMode = curMode; curMode = p.mode; modeFade = 1.0f; }
+
+        for (int i = 0; i < m; ++i)
+        {
+            const float d  = driveS.next(), b = biasS.next(), mx = mixS.next(), o = outS.next();
+            const double g = std::exp2 ((double) d * 6.643856);   // 0..40 dB
+            const double bd = (double) b;
+
+            const float dryL = dryPrev[0]; dryPrev[0] = l[i];
+            const float dryR = dryPrev[1]; dryPrev[1] = r[i];
+
+            const double inL = (double) l[i] * g;
+            const double inR = (double) r[i] * g;
+
+            double yl = stepChannel (0, inL, bd, curMode);
+            double yr = stepChannel (1, inR, bd, curMode);
+
+            if (modeFade > 0.0f)
+            {
+                // x1[c] now holds in, x2[c] holds prevIn; evaluate previous curve on shared history for click-free switch
+                const double oldL = adaa2Eval (inL, prevX1[0], prevX2[0], bd, oldMode);
+                const double oldR = adaa2Eval (inR, prevX1[1], prevX2[1], bd, oldMode);
+                yl += (double) modeFade * (oldL - yl);
+                yr += (double) modeFade * (oldR - yr);
+                modeFade = std::max (0.0f, modeFade - modeStep);
+            }
+
+            const float wl = (float) dc[0].process (yl);
+            const float wr = (float) dc[1].process (yr);
+            l[i] = dryL + mx * (wl * o - dryL);
+            r[i] = dryR + mx * (wr * o - dryR);
+        }
+    }
+
 private:
+    double stepChannel (int c, double x0, double b, int mode) noexcept
+    {
+        prevX1[c] = x1[c];
+        prevX2[c] = x2[c];
+
+        // Refresh cached antiderivatives if bias or mode moved (prevents parameter-modulation cancellation glitches)
+        if (std::abs (b - bPrev[c]) > 1.0e-12 || mode != modePrev[c])
+        {
+            f1_1[c] = adaaF1 (x1[c], b, mode);
+            f2_1[c] = adaaF2 (x1[c], b, mode);
+            f2_2[c] = adaaF2 (x2[c], b, mode);
+        }
+
+        const double f1_0 = adaaF1 (x0, b, mode);
+        const double f2_0 = adaaF2 (x0, b, mode);
+
+        const double y = adaa2Half (x0,    x1[c], f2_0,    f2_1[c], f1_1[c], b, mode)
+                       + adaa2Half (x2[c], x1[c], f2_2[c], f2_1[c], f1_1[c], b, mode);
+
+        x2[c] = x1[c]; f2_2[c] = f2_1[c];
+        x1[c] = x0;    f1_1[c] = f1_0; f2_1[c] = f2_0;
+        bPrev[c] = b;  modePrev[c] = mode;
+        return y;
+    }
+
     DcBlocker dc[2];
     Smooth driveS, biasS, mixS, outS;
+    double x1[2] {}, x2[2] {}, prevX1[2] {}, prevX2[2] {};
+    double f1_1[2] {}, f2_1[2] {}, f2_2[2] {}, bPrev[2] {};
+    int modePrev[2] { -1, -1 };
+    float dryPrev[2] {};
+    int curMode = 0, oldMode = 0;
+    float modeFade = 0.0f, modeStep = 1.0f / 2880.0f;
+    bool modePrimed = false;
 };
 
 //==============================================================================
 /** (10) Analog bias modulator: programme-dependent supply sag (gain drops + bias walks as current is drawn)
-    feeding a magnetic tape curve with simple hysteresis memory and head-gap HF loss. Runs at the 4x rate. */
+    feeding a 64-bit magnetic tape curve with hysteresis memory and head-gap HF loss. Runs at the 4x rate. */
 class BiasModulator
 {
 public:
@@ -84,8 +289,9 @@ public:
     void prepare (float rate)
     {
         sr = rate;
-        for (auto& d : dc) d.prepare (sr);
-        y1[0] = y1[1] = 0.0f;
+        for (auto& d : dc) d.prepare ((double) sr, 5.0);
+        y1[0] = y1[1] = 0.0;
+        xPrev[0] = xPrev[1] = 0.0;
         head[0].reset(); head[1].reset();
         kR.reset(); isR.reset(); hystR.reset(); amtR.reset(); sagR.reset();
         env.reset();
@@ -102,25 +308,41 @@ public:
 
         for (int i = 0; i < m; ++i)
         {
-            const float k = kR.next(), is = isR.next(), hyst = hystR.next(), amt = amtR.next(), sag = sagR.next();
-            const float e = std::min (2.0f, env.process (0.5f * (l[i] + r[i])) * 2.0f);
-            const float sagGain = 1.0f / (1.0f + sag * 3.0f * e);
-            const float b = amt + sag * 0.25f * e;
-            const float stat = fastTanh (b);
+            const double k = (double) kR.next(), is = (double) isR.next(), hyst = (double) hystR.next();
+            const double amt = (double) amtR.next(), sag = (double) sagR.next();
+            const double e = (double) std::min (2.0f, env.process (0.5f * (l[i] + r[i])) * 2.0f);
+            const double sagGain = 1.0 / (1.0 + sag * 3.0 * e);
+            const double b = amt + sag * 0.25 * e;
+            const double stat = fastTanhD (b);
 
             float* io[2] { l + i, r + i };
             for (int c = 0; c < 2; ++c)
             {
-                const float in = *io[c] * sagGain * k + b;
-                float y = fastTanh (in + hyst * (y1[c] - 0.5f * in));
+                const double in = (double) (*io[c]) * sagGain * k + b;
+                double y;
+                if (hyst < 1.0e-5)
+                {
+                    // Pure feedforward path -> 64-bit ADAA1 of tanh
+                    const double dx = in - xPrev[c];
+                    y = std::abs (dx) > 1.0e-5 ? (tanhF1 (in) - tanhF1 (xPrev[c])) / dx
+                                               : fastTanhD (0.5 * (in + xPrev[c]));
+                    xPrev[c] = in;
+                }
+                else
+                {
+                    // Feedback hysteresis path -> smooth 64-bit C-infinity tanh (never ADAA inside feedback)
+                    y = fastTanhD (in + hyst * (y1[c] - 0.5 * in));
+                    xPrev[c] = in;
+                }
                 y1[c] = y;
-                *io[c] = dc[c].process (head[c].process ((y - stat) * is));
+                *io[c] = (float) dc[c].process ((double) head[c].process ((float) ((y - stat) * is)));
             }
         }
     }
 
 private:
-    float sr = 192000.0f, y1[2] {};
+    float sr = 192000.0f;
+    double y1[2] {}, xPrev[2] {};
     EnvFollower env;
     DcBlocker dc[2];
     OnePole head[2];
@@ -128,10 +350,11 @@ private:
 };
 
 //==============================================================================
-/** The non-linear core of RUIN in one 4x oversampled block: (6) tube → (15) post tilt → (10) tape bias.
-    Polyphase IIR half-band stages (lowest latency). Every parallel blend inside (tube mix, bias bypass fade)
-    happens in the oversampled domain, so dry and wet always share the same transfer function. The block always
-    runs, even with everything off, so switching a stage never changes latency or phase. */
+/** The non-linear core of RUIN in one 4x Type-I linear-phase FIR oversampled block:
+    (6) ADAA2 tube -> (15) post tilt -> (10) tape bias.
+    Uses equiripple linear-phase halfband FIR + exact integer oversampled padding (0..3 samples at 4x)
+    so total active latency is an exact linear-phase integer (0-sample PDC error, phase-exact sub alignment),
+    and bypasses at 0-sample latency when both nonlinear modules are off at prepareToPlay. */
 class RuinCore
 {
 public:
@@ -139,29 +362,63 @@ public:
 
     void prepare (float sampleRate, int maxBlock)
     {
+        baseSr = sampleRate;
         osr = 4.0f * sampleRate;
-        os = std::make_unique<juce::dsp::Oversampling<float>> (2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
-        os->initProcessing ((size_t) maxBlock);
-        os->reset();
+        os.prepare (maxBlock);
+        const int q = (int) std::llround (((double) os.getLatencyInSamples() + 0.25) * 4.0);
+        pad4x = (4 - (q & 3)) & 3;
         tube.prepare (osr);
         bias.prepare (osr);
         tilt[0].reset(); tilt[1].reset();
         biasFade.prepare (osr);
         dry.setSize (2, maxBlock * 4);
+        resetPads();
+        osActive = true;   // standalone callers (QA / lab) default to active; processor snap() configures true 0-latency bypass
     }
 
-    /** Group delay of the up/down pair at low frequency (fractional samples at the base rate). */
-    float latency() const { return os ? os->getLatencyInSamples() : 0.0f; }
+    /** Exact linear-phase integer latency in base-rate samples (0 when bypassed). */
+    float latency() const
+    {
+        if (! osActive) return 0.0f;
+        return os.getLatencyInSamples() + (float) (1 + pad4x) * 0.25f;
+    }
+
     void snapBias (bool on) { biasFade.snap (on); }
+
+    /** Synchronous state snap (called from prepareToPlay / state load): configures exact 0-latency bypass when dry. */
+    void snap (bool tubeOn, bool biasOn)
+    {
+        osActive = tubeOn || biasOn;
+        biasFade.snap (biasOn);
+        os.reset();
+        tube.resetState();
+        tilt[0].reset(); tilt[1].reset();
+        resetPads();
+    }
 
     void process (float* l, float* r, int n, const Params& p)
     {
-        float* chans[2] { l, r };
-        juce::dsp::AudioBlock<float> block (chans, 2, (size_t) n);
-        auto up = os->processSamplesUp (block);
-        const int m = (int) up.getNumSamples();
-        float* ul = up.getChannelPointer (0);
-        float* ur = up.getChannelPointer (1);
+        if (! osActive && ! p.tube.on && ! p.bias.on)
+        {
+            // True 0-latency 1x bypass path (linear post-tilt only)
+            tilt[0].set (p.postTiltDb, p.postPivot, baseSr, n);
+            tilt[1].set (p.postTiltDb, p.postPivot, baseSr, n);
+            for (int i = 0; i < n; ++i) { l[i] = tilt[0].process (l[i]); r[i] = tilt[1].process (r[i]); }
+            return;
+        }
+        if (! osActive)
+        {
+            osActive = true;
+            os.reset();
+            tube.resetState();
+            tilt[0].reset(); tilt[1].reset();
+            resetPads();
+        }
+
+        os.processUp (l, r, n);
+        const int m = n * 4;
+        float* ul = os.upL();
+        float* ur = os.upR();
 
         tube.process (ul, ur, m, p.tube);
 
@@ -185,17 +442,36 @@ public:
         }
         else if (on) bias.process (ul, ur, m, p.bias);
 
-        os->processSamplesDown (block);
+        if (pad4x > 0)
+        {
+            for (int i = 0; i < m; ++i)
+            {
+                const float pl = padBuf[0][padIdx]; padBuf[0][padIdx] = ul[i]; ul[i] = pl;
+                const float pr = padBuf[1][padIdx]; padBuf[1][padIdx] = ur[i]; ur[i] = pr;
+                if (++padIdx >= pad4x) padIdx = 0;
+            }
+        }
+
+        os.processDown (l, r, n);
     }
 
 private:
-    float osr = 192000.0f;
-    std::unique_ptr<juce::dsp::Oversampling<float>> os;
+    void resetPads() noexcept
+    {
+        for (int c = 0; c < 2; ++c) for (int k = 0; k < 4; ++k) padBuf[c][k] = 0.0f;
+        padIdx = 0;
+    }
+
+    float baseSr = 48000.0f, osr = 192000.0f;
+    LinearPhase4xOs os;
     TubeDrive tube;
     BiasModulator bias;
     Tilt tilt[2];
     BypassFade biasFade;
     juce::AudioBuffer<float> dry;
+    float padBuf[2][4] {};
+    int pad4x = 0, padIdx = 0;
+    bool osActive = true;
 };
 
 //==============================================================================
