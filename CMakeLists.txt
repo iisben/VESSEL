@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(VESSEL VERSION 1.0.1 LANGUAGES C CXX)
+project(VESSEL VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,12 +21,17 @@ else()
   FetchContent_MakeAvailable(JUCE)
 endif()
 
+set(VESSEL_FORMATS VST3 Standalone)
+if(APPLE)
+  list(APPEND VESSEL_FORMATS AU)
+endif()
+
 juce_add_plugin(Vessel
   COMPANY_NAME                "iisben"
   BUNDLE_ID                   "audio.vessel.vessel"
   PLUGIN_MANUFACTURER_CODE    Vsla
   PLUGIN_CODE                 Vssl
-  FORMATS                     VST3 AU Standalone
+  FORMATS                     ${VESSEL_FORMATS}
   PRODUCT_NAME                "VESSEL"
   IS_SYNTH                    TRUE
   NEEDS_MIDI_INPUT            TRUE
@@ -46,8 +51,12 @@ if(APPLE AND TARGET Vessel_AU)
     VERBATIM)
 endif()
 
-# Factory preset bank (a juce::ValueTree XML document), compiled in
-juce_add_binary_data(VesselData SOURCES Presets/FactoryBank.xml)
+# Factory preset bank + embedded SIL OFL typography (Space Grotesk + JetBrains Mono), compiled in
+juce_add_binary_data(VesselData SOURCES
+  Presets/FactoryBank.xml
+  Resources/Fonts/SpaceGrotesk-Bold.ttf
+  Resources/Fonts/SpaceGrotesk-Medium.ttf
+  Resources/Fonts/JetBrainsMono-Medium.ttf)
 set_target_properties(VesselData PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 
 target_sources(Vessel PRIVATE
@@ -59,7 +68,7 @@ target_sources(Vessel PRIVATE
   Source/dsp/Tables.cpp
   Source/ui/Reliquary.cpp
   Source/ui/Controls.cpp
-  Source/ui/Backdrop.cpp
+  Source/ui/HeroCenterpiece.cpp
   Source/ui/Torch.cpp
   Source/ui/Panels.cpp
   Source/ui/Routing.cpp)
@@ -69,8 +78,7 @@ target_include_directories(Vessel PRIVATE Source)
 target_compile_definitions(Vessel PUBLIC
   JUCE_WEB_BROWSER=0
   JUCE_USE_CURL=0
-  JUCE_VST3_CAN_REPLACE_VST2=0
-  JUCE_DISPLAY_SPLASH_SCREEN=0)
+  JUCE_VST3_CAN_REPLACE_VST2=0)
 
 if(WIN32)
   target_compile_definitions(Vessel PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -81,23 +89,20 @@ target_link_libraries(Vessel
     VesselData
     juce::juce_audio_utils
     juce::juce_dsp
-    juce::juce_opengl
   PUBLIC
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags)
 
-# The Echo Sound Works Core Tables (CC0), as 16-bit FLAC: copied into each bundle's Contents/Resources/Wavetables
+# Wavetables (CC0, 16-bit FLAC): copied into each bundle's Contents/Resources/Wavetables
 foreach(fmt VST3 AU Standalone)
   if(TARGET Vessel_${fmt})
     juce_add_bundle_resources_directory(Vessel_${fmt} Wavetables)
   endif()
 endforeach()
 
-# juce_add_bundle_resources_directory only works on Apple. On Windows the VST3 binary sits in
-# VESSEL.vst3/Contents/x86_64-win, so the tables go to Contents/Resources/Wavetables (where tablesFolder() looks),
-# and the standalone gets them next to its .exe.
-if(WIN32)
+# juce_add_bundle_resources_directory only works on Apple. On Windows/Linux copy Wavetables beside targets.
+if(WIN32 OR UNIX AND NOT APPLE)
   if(TARGET Vessel_VST3)
     add_custom_command(TARGET Vessel_VST3 POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Wavetables" "$<TARGET_FILE_DIR:Vessel_VST3>/../Resources/Wavetables"
@@ -158,6 +163,40 @@ if(VESSEL_BUILD_QA)
     VesselData
     juce::juce_audio_processors
     juce::juce_audio_formats
+    juce::juce_dsp
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_lto_flags
+    juce::juce_recommended_warning_flags)
+
+  # Headless Retina UI snapshot QA runner (ScopedJuceInitialiser_GUI, zero OpenGL/audio-device deps)
+  juce_add_console_app(Vessel2UiQA PRODUCT_NAME "Vessel2UiQA")
+  target_sources(Vessel2UiQA PRIVATE
+    tools/Vessel2UiQA.cpp
+    Source/Parameters.cpp
+    Source/Presets.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp
+    Source/dsp/Wavetable.cpp
+    Source/dsp/Tables.cpp
+    Source/ui/Reliquary.cpp
+    Source/ui/Controls.cpp
+    Source/ui/HeroCenterpiece.cpp
+    Source/ui/Torch.cpp
+    Source/ui/Panels.cpp
+    Source/ui/Routing.cpp)
+  target_include_directories(Vessel2UiQA PRIVATE Source)
+  target_compile_definitions(Vessel2UiQA PRIVATE
+    VESSEL_TABLES_DIR="${CMAKE_SOURCE_DIR}/Wavetables"
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_USE_FLAC=1)
+  if(WIN32)
+    target_compile_definitions(Vessel2UiQA PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  target_link_libraries(Vessel2UiQA PRIVATE
+    VesselData
+    juce::juce_audio_utils
     juce::juce_dsp
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
