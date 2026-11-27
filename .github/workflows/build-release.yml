@@ -264,10 +264,12 @@ jobs:
       - name: Upload Assets to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           ls -lh release-assets/
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "VESSEL ${TAG#v} (macOS, Windows, Linux)" --generate-notes
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* --title "VESSEL ${TAG#v} (macOS, Windows, Linux)" --generate-notes
           fi
-          gh release upload "$TAG" release-assets/* --clobber
