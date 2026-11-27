@@ -1,7 +1,7 @@
 # VESSEL II — Engineering & QA Ledger
 
-- **Current Stage:** `Stage 1: PASS`
-- **Next Stage:** `Stage 2`
+- **Current Stage:** `Stage 2: PASS`
+- **Next Stage:** `Stage 3A`
 - **Branch:** `feat/vessel-v2-namm` (initialized from V1.0.1 baseline on `main`; no git remote configured yet)
 - **DSP Core Freeze:** `NOT FROZEN` (freezes after Stage 3B)
 
@@ -98,3 +98,22 @@
 - **Stage 5 (NAMM 2027 Brutalist-Industrial UI/UX):** Remove `juce_opengl` / `Backdrop` GLSL dependency; build pre-rendered 2x Retina `juce::Image` static panel/chassis cache + 60 Hz native JUCE `Graphics` live overlays on strict 8px grid (deep obsidian/gunmetal, hairline bevels, cold-steel/phosphor-amber & pale-cyan arcs, consistent typography). Interactive centerpiece: 60 Hz lock-free Dual Oscilloscope/Spectral-Contour + draggable XY Sculptor. Top bar: VESSEL II wordmark, Preset Bar + Searchable/Tagged/Favorites Browser Overlay, A/B, Undo/Redo, MPE badge, `75/100/125/150%` zoom + persisted aspect-locked resize, Peak/LUFS & Sub-120 Hz mono-correlation meters. Bottom dock: 4 Hero Macro knobs w/ dynamic names + live mod arcs + Organic Drift & Texture Mix. Mandatory 1x/2x Retina headless snapshot self-inspection.
 - **Stage 6 (20 Flagship Production Presets):** 5 categories × 4 presets = 20 original commercial presets (zero third-party names): *Subterranean Basses & Monolith Subs*, *Haunting Analog Brass & Dystopian Leads*, *Cathedral & Dystopian Pads*, *Fractured IDM Plucks, Keys & Metallic Bells*, *Club Anthems, Tension Hooks & Hybrid Weapons*. All 4 Hero Macros + Mod Wheel + MPE/Aftertouch active; closed-loop QA (`TP <= -0.5 dBFS`, RMS `-18..-10 dBFS`, DC `< -80 dBFS`, sub-120 Hz corr `>= +0.5`, mono drop `<= 3.5 dB`, active macro delta, timbral diversity) + 20× 4s 48k/24-bit WAV audition clips.
 - **Stage 7 (3-OS Cross-Platform Release & Packaging):** Harden CMake (Windows MSVC `NOMINMAX`/`WIN32_LEAN_AND_MEAN`, Linux `Wavetables` copy, macOS Universal `arm64;x86_64`), build & validate macOS locally (`Vessel2QA`, `auval`, ad-hoc sign, local install, `dist/macos/VESSEL-II-macOS-Universal.zip`), add `.github/workflows/build-release.yml` (3-OS matrix + `pluginval` L5) + `scripts/build_windows.ps1` + `scripts/build_linux.sh`, run/verify CI or local builds, clean scratch logs (keeping audition WAVs, UI snapshots, `dist/`).
+
+---
+
+## Stage 2 — Locked 8-Gate Headless DSP QA Harness & Baseline Capture
+- **Harness:** `tools/Vessel2QA.cpp` wired permanently into `CMakeLists.txt` (`Vessel2QA`, `VESSEL_HEADLESS=1`, C++20 `std::numbers::pi_v`, zero GUI/OpenGL/audio-device deps, Release `-O3`, 0 warnings). Added read-only `VesselProcessor::activeVoiceCount()` and `#if VESSEL_HEADLESS` editor/timer guards in `Source/PluginProcessor.{h,cpp}`; added `CMAKE_EXPORT_COMPILE_COMMANDS ON` and MSVC `NOMINMAX`/`WIN32_LEAN_AND_MEAN` to `CMakeLists.txt`.
+- **Scratch Artifacts:** `build/vessel2_qa/qa_report.txt`, `build/vessel2_qa/v1_preset_baseline.csv`, `build/vessel2_qa/build.log`.
+
+| Gate | Name | V1 Baseline | Locked Target | Status |
+|---|---|---|---|---|
+| 1 | Osc & FM Aliasing Floor | C6 `-88.5`, C7 `-86.4`, FM C5 (`1:1`/`1:1.414` idx `3.0`) `-88.1`/`-88.5 dBc` | `< -80` C6, `< -75` C7, `< -70 dBc` FM | **PASS** |
+| 2 | Bandwidth & Transient | Saw C4 BW `18314 Hz` @48/96k; ADSR `0.46 ms`, **Proc `7.62 ms`** (`fltFade.snap(true)` bug) | `>= 18 kHz`, `90%` in attack, 0 DC step | **FAIL** |
+| 3 | Nonlinearity & ADAA | ADAA F1'/F2' **PENDING**; Tube `-27.9..-24.3 dBc` (`15.7-19.5 dB` supp), Clip `-27.0 dBc` (`1.8 dB` supp), DC `<-111 dBFS` | `F1'==f < 1e-5`; `< -80 dBc` or `>=20 dB` supp; DC `<-90` | **FAIL** (`PENDING` ADAA) |
+| 4 | Filter Mod & Self-Osc | 1 kHz mod 44.1..192k 95–100% res bounded (`0` NaN); SVF `0.02 ct`, Lad `0.32 ct`; rateDiff `0.479 dB` | Bounded; SVF `±5 ct`, Lad `±15 ct`; `±0.5 dB <=12k` | **PASS** |
+| 5 | Odd-Block, Rate & PDC | Odd res **`-80.2 dBFS`**, rate-switch res **`-30.5 dBFS`** (`TubeDrive` smoothers unreset), PDC act `110/111`, byp **`110/111`** | Res `< -100 dBFS`, `0` PDC err, `0` bypass lat | **FAIL** |
+| 6 | Voice Steal, DC & Idle | Steal 2nd-diff **`20.87x`**, DC **`-48.4 dBFS`**; 10s tail `-300 dBFS`, voices `0`, idle CPU **`1.255%` RT** | `<=5x` curv, DC `<-90`, tail `<-120`, `0` v, `<0.5%` idle | **FAIL** |
+| 7 | V1 Preset Snapshot | `16/96` diverse presets rendered, `0` non-finite, `minSub120Corr=0.996` (saved `v1_preset_baseline.csv`) | Finite, baseline captured (`±0.05 dB` regress in S4–7) | **PASS** |
+| 8 | Poly CPU Budget (`-O3`) | 8/8 voices stress @48k: median **`643.8 µs` (`6.04%` RT)**, p95 `670.5 µs` (`6.29%` RT) | `< 15.0%` RT (16 voices after Stage 3B) | **PASS** |
+
+- **Stage 2 Status:** `PASS` (4/8 baseline PASS, 4/8 baseline FAIL exposing exact Stage 3A/3B gaps, ADAA Part A `PENDING` until Stage 3A). **Next:** `Stage 3A`.

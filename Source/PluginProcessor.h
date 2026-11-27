@@ -49,7 +49,20 @@ public:
     using AudioProcessor::processBlock;
 
     juce::AudioProcessorEditor* createEditor() override;
+#if VESSEL_HEADLESS
+    bool hasEditor() const override { return false; }
+#else
     bool hasEditor() const override { return true; }
+#endif
+
+    /** Read-only count of currently active synth voices (used by headless QA). */
+    int activeVoiceCount() const noexcept
+    {
+        int count = 0;
+        for (int v = 0; v < vessel::dsp::VoiceManager::kVoices; ++v)
+            if (voices.voiceActive (v)) ++count;
+        return count;
+    }
 
     const juce::String getName() const override { return "VESSEL"; }
     bool acceptsMidi() const override { return true; }

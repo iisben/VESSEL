@@ -1,5 +1,7 @@
 #include "PluginProcessor.h"
+#if ! VESSEL_HEADLESS
 #include "PluginEditor.h"
+#endif
 #include "Presets.h"
 
 using namespace vessel;
@@ -34,13 +36,17 @@ VesselProcessor::VesselProcessor()
 
     resetDrawTables();
     PresetBank::factory();   // parse the factory bank on the message thread
+#if ! VESSEL_HEADLESS
     startTimerHz (8);
+#endif
 }
 
 VesselProcessor::~VesselProcessor()
 {
     aliveFlag->store (false, std::memory_order_release);
+#if ! VESSEL_HEADLESS
     stopTimer();
+#endif
 }
 
 bool VesselProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -873,6 +879,10 @@ void VesselProcessor::setStateInformation (const void* data, int size)
     snapPending.store (true, std::memory_order_release);
 }
 
+#if VESSEL_HEADLESS
+juce::AudioProcessorEditor* VesselProcessor::createEditor() { return nullptr; }
+#else
 juce::AudioProcessorEditor* VesselProcessor::createEditor() { return new VesselEditor (*this); }
+#endif
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new VesselProcessor(); }
