@@ -51,13 +51,10 @@ if(APPLE AND TARGET Vessel_AU)
     VERBATIM)
 endif()
 
-# Factory preset banks (V1 + V2 Flagship) + embedded SIL OFL typography (Space Grotesk + JetBrains Mono), compiled in
+# Factory preset banks (V1 + V2 Flagship), compiled in
 juce_add_binary_data(VesselData SOURCES
   Presets/FactoryBank.xml
-  Presets/V2FlagshipBank.xml
-  Resources/Fonts/SpaceGrotesk-Bold.ttf
-  Resources/Fonts/SpaceGrotesk-Medium.ttf
-  Resources/Fonts/JetBrainsMono-Medium.ttf)
+  Presets/V2FlagshipBank.xml)
 set_target_properties(VesselData PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 
 target_sources(Vessel PRIVATE
@@ -69,7 +66,7 @@ target_sources(Vessel PRIVATE
   Source/dsp/Tables.cpp
   Source/ui/Reliquary.cpp
   Source/ui/Controls.cpp
-  Source/ui/HeroCenterpiece.cpp
+  Source/ui/Backdrop.cpp
   Source/ui/Torch.cpp
   Source/ui/Panels.cpp
   Source/ui/Routing.cpp)
@@ -94,6 +91,7 @@ target_link_libraries(Vessel
     VesselData
     juce::juce_audio_utils
     juce::juce_dsp
+    juce::juce_opengl
   PUBLIC
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
@@ -174,43 +172,6 @@ if(VESSEL_BUILD_QA)
     VesselData
     juce::juce_audio_processors
     juce::juce_audio_formats
-    juce::juce_dsp
-    juce::juce_recommended_config_flags
-    juce::juce_recommended_lto_flags
-    juce::juce_recommended_warning_flags)
-
-  # Headless Retina UI snapshot QA runner (ScopedJuceInitialiser_GUI, zero OpenGL/audio-device deps)
-  juce_add_console_app(Vessel2UiQA PRODUCT_NAME "Vessel2UiQA")
-  target_sources(Vessel2UiQA PRIVATE
-    tools/Vessel2UiQA.cpp
-    Source/Parameters.cpp
-    Source/Presets.cpp
-    Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp
-    Source/dsp/Wavetable.cpp
-    Source/dsp/Tables.cpp
-    Source/ui/Reliquary.cpp
-    Source/ui/Controls.cpp
-    Source/ui/HeroCenterpiece.cpp
-    Source/ui/Torch.cpp
-    Source/ui/Panels.cpp
-    Source/ui/Routing.cpp)
-  target_include_directories(Vessel2UiQA PRIVATE Source)
-  target_compile_definitions(Vessel2UiQA PRIVATE
-    VESSEL_TABLES_DIR="${CMAKE_SOURCE_DIR}/Wavetables"
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_USE_FLAC=1)
-  if(WIN32)
-    target_compile_definitions(Vessel2UiQA PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-  endif()
-  if(MSVC)
-    target_compile_options(Vessel2UiQA PRIVATE /utf-8 /bigobj)
-  endif()
-  target_link_libraries(Vessel2UiQA PRIVATE
-    VesselData
-    juce::juce_audio_utils
     juce::juce_dsp
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags

@@ -274,4 +274,5 @@
 | **Linux** | VST3, Standalone (`x86_64` GCC) | Ready via `.github/workflows/build-release.yml` (`ubuntu-24.04` + `pluginval` L5) & `scripts/build_linux.sh` | `dist/linux/VESSEL-II-Linux-x86_64.tar.gz` (via CI / local Linux script) |
 
 - **Preserved Showcase Assets:** `build/vessel2_qa/audition/` (20× 4s 48 kHz/24-bit WAVs), `build/vessel2_qa/ui_snapshots/` (10× 1x/2x Retina PNGs), `dist/macos/VESSEL-II-macOS-Universal.zip`.
+- **Post-Stage-7 User Override (UI Rollback):** Restored original V1 Reliquary / OpenGL ink-backdrop UI (`1240x780`, `Backdrop`, `Reliquary`, `Controls`, `Panels`, `PluginEditor` from Stage 4 `a611a6c`) per user request while retaining all V2 DSP, V2 control-plane, 20 V2 flagship presets (`116` total in browser), and 3-OS release pipeline; rebuilt & reinstalled Universal `arm64;x86_64` VST3/AU/Standalone (`Vessel2QA` 9/9, `Vessel2PresetQA` 20/20, `HostProbe` PASS, `auval` PASS, `dist/macos/VESSEL-II-macOS-Universal.zip` `115 MB`, SHA-256 `6da4d6dc...47b`).
 - **STATUS: ALL_STAGES_COMPLETE**
