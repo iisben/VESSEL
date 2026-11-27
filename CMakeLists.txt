@@ -4,6 +4,7 @@ project(VESSEL VERSION 1.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
 # Point this at a local JUCE checkout to skip the download, e.g.
@@ -71,6 +72,10 @@ target_compile_definitions(Vessel PUBLIC
   JUCE_VST3_CAN_REPLACE_VST2=0
   JUCE_DISPLAY_SPLASH_SCREEN=0)
 
+if(WIN32)
+  target_compile_definitions(Vessel PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 target_link_libraries(Vessel
   PRIVATE
     VesselData
@@ -125,4 +130,36 @@ if(VESSEL_BUILD_CHECK)
   target_compile_definitions(HostProbe PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
   target_link_libraries(HostProbe PRIVATE juce::juce_audio_utils juce::juce_audio_processors
                         juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
+endif()
+
+# Permanent headless 8-gate DSP QA harness (zero GUI, OpenGL, or OS audio-device dependencies)
+option(VESSEL_BUILD_QA "Build the headless Vessel2QA 8-gate DSP QA executable" ON)
+if(VESSEL_BUILD_QA)
+  juce_add_console_app(Vessel2QA PRODUCT_NAME "Vessel2QA")
+  target_sources(Vessel2QA PRIVATE
+    tools/Vessel2QA.cpp
+    Source/Parameters.cpp
+    Source/Presets.cpp
+    Source/PluginProcessor.cpp
+    Source/dsp/Wavetable.cpp
+    Source/dsp/Tables.cpp)
+  target_include_directories(Vessel2QA PRIVATE Source)
+  target_compile_definitions(Vessel2QA PRIVATE
+    VESSEL_HEADLESS=1
+    VESSEL_TABLES_DIR="${CMAKE_SOURCE_DIR}/Wavetables"
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_USE_FLAC=1)
+  if(WIN32)
+    target_compile_definitions(Vessel2QA PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  target_link_libraries(Vessel2QA PRIVATE
+    VesselData
+    juce::juce_audio_processors
+    juce::juce_audio_formats
+    juce::juce_dsp
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_lto_flags
+    juce::juce_recommended_warning_flags)
 endif()
