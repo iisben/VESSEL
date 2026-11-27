@@ -14,26 +14,30 @@ public:
     void prepare (float sampleRate)
     {
         sr = sampleRate;
-        env.reset(); envN = 0.0f;
+        env.reset(); envN = 0.0f; sampleCount = 0;
         f[0].reset(); f[1].reset();
         cutR.reset(); depthR.reset(); qR.reset(); mixR.reset();
     }
     float lastEnv() const noexcept { return envN; }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! p.on) { envN = 0.0f; return; }
-        env.setTimes (p.attackMs, p.releaseMs, sr);
-        cutR.to (std::log2 (std::max (20.0f, p.cutoff)), n); depthR.to (p.depth, n);
-        qR.to (0.6f + p.res * 9.0f, n); mixR.to (p.mix, n);
+        if (isCtrlTick)
+        {
+            env.setTimes (p.attackMs, p.releaseMs, sr);
+            cutR.to (fastLog2 (std::max (20.0f, p.cutoff)), ctrlSpan); depthR.to (p.depth, ctrlSpan);
+            qR.to (0.6f + p.res * 9.0f, ctrlSpan); mixR.to (p.mix, ctrlSpan);
+        }
 
         for (int i = 0; i < n; ++i)
         {
             const float lc = cutR.next(), dp = depthR.next(), q = qR.next(), mix = mixR.next();
             envN = std::min (1.0f, env.process (0.5f * (l[i] + r[i])) * 3.0f);
-            if ((i & 7) == 0)
+            if ((sampleCount++ & 7u) == 0u)
             {
-                const float fc = std::exp2 (lc + dp * 7.0f * envN);
+                const float fc = fastExp2 (lc + dp * 7.0f * envN);
                 f[0].setup (fc, q, sr); f[1].setup (fc, q, sr);
             }
             l[i] += mix * (f[0].lowpass (l[i]) - l[i]);
@@ -43,6 +47,7 @@ public:
 
 private:
     float sr = 48000.0f, envN = 0.0f;
+    uint64_t sampleCount = 0;
     EnvFollower env;
     Svf f[2];
     Ramp cutR, depthR, qR, mixR;
@@ -59,22 +64,25 @@ public:
     void prepare (float sampleRate)
     {
         sr = sampleRate;
-        env.reset(); lastCut = 0.0f; g1 = g2 = 1.0f;
+        env.reset(); lastCut = 0.0f; g1 = g2 = 1.0f; sampleCount = 0;
         keyLp.reset();
         for (int c = 0; c < 2; ++c) { b1[c].reset(); b2[c].reset(); }
     }
     float reductionDb() const noexcept { return lastCut; }
 
-    void process (float* l, float* r, const float* key, int n, const Params& p)
+    void process (float* l, float* r, const float* key, int n, const Params& p, bool isCtrlTick = true)
     {
         if (! p.on) { lastCut = 0.0f; return; }
-        env.setTimes (2.0f, p.releaseMs, sr);
-        keyLp.setup (p.freq * 1.5f, 0.7f, sr);
+        if (isCtrlTick)
+        {
+            env.setTimes (2.0f, p.releaseMs, sr);
+            keyLp.setup (p.freq * 1.5f, 0.7f, sr);
+        }
 
         for (int i = 0; i < n; ++i)
         {
             const float e = std::min (1.0f, env.process (keyLp.lowpass (key[i])) * 2.5f);
-            if ((i & 15) == 0)
+            if ((sampleCount++ & 15u) == 0u)
             {
                 lastCut = p.depthDb * e;
                 g1 = dbToGain (-lastCut);
@@ -88,6 +96,7 @@ public:
 
 private:
     float sr = 48000.0f, lastCut = 0.0f, g1 = 1.0f, g2 = 1.0f;
+    uint64_t sampleCount = 0;
     EnvFollower env;
     Svf keyLp, b1[2], b2[2];
 };
@@ -103,20 +112,25 @@ public:
     void prepare (float sampleRate)
     {
         sr = sampleRate;
+        sampleCount = 0;
         for (int c = 0; c < 2; ++c) for (int k = 0; k < 4; ++k) f[c][k].reset();
         vowelR.reset(); bodyR.reset(); shiftR.reset(); resR.reset(); mixR.reset();
     }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! p.on) return;
-        vowelR.to (std::clamp (p.vowel, 0.0f, 4.0f), n); bodyR.to (p.body, n); shiftR.to (p.shift, n);
-        resR.to (p.res, n); mixR.to (p.mix, n);
+        if (isCtrlTick)
+        {
+            vowelR.to (std::clamp (p.vowel, 0.0f, 4.0f), ctrlSpan); bodyR.to (p.body, ctrlSpan); shiftR.to (p.shift, ctrlSpan);
+            resR.to (p.res, ctrlSpan); mixR.to (p.mix, ctrlSpan);
+        }
 
         for (int i = 0; i < n; ++i)
         {
             const float v = vowelR.next(), b = bodyR.next(), sh = shiftR.next(), re = resR.next(), mix = mixR.next();
-            if ((i & 3) == 0) update (v, b, sh, re);   // resonators re-tuned every 4 samples from ramped controls
+            if ((sampleCount++ & 3u) == 0u) update (v, b, sh, re);   // resonators re-tuned every 4 absolute samples
 
             float wl = 0.0f, wr = 0.0f;
             for (int k = 0; k < 4; ++k)
@@ -157,6 +171,7 @@ private:
     }
 
     float sr = 48000.0f, gains[4] {}, makeup = 1.6f;
+    uint64_t sampleCount = 0;
     Svf f[2][4];
     Ramp vowelR, bodyR, shiftR, resR, mixR;
 };

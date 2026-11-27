@@ -42,16 +42,9 @@ public:
         return std::clamp ((int) std::ceil (fMip), 0, kMips - 1);
     }
 
-    /** 4-point cubic Hermite (Catmull-Rom) lookup with bidirectional [0, 1) phase wrapping. */
-    float read (int frame, int mip, double phase) const noexcept
+    /** Fast 4-point Hermite read on a pre-resolved table pointer with phase already in [0, 1). */
+    static inline float readFast (const float* __restrict t, int i, float f) noexcept
     {
-        frame = std::clamp (frame, 0, nFrames - 1);
-        mip   = std::clamp (mip, 0, kMips - 1);
-        const double p = wrapPhase01 (phase);
-        const float* t = table (frame, mip);
-        const double x = p * (double) kSize;
-        const int i = std::min ((int) x, kSize - 1);
-        const float f = (float) (x - (double) i);
         const float y0 = t[i - 1], y1 = t[i], y2 = t[i + 1], y3 = t[i + 2];
         const float c1 = 0.5f * (y2 - y0);
         const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
@@ -59,19 +52,105 @@ public:
         return ((c3 * f + c2) * f + c1) * f + y1;
     }
 
+    static inline float readFast (const float* __restrict t, double p) noexcept
+    {
+        const double x = p * (double) kSize;
+        const int i = std::min ((int) x, kSize - 1);
+        return readFast (t, i, (float) (x - (double) i));
+    }
+
+    /** 4-point cubic Hermite (Catmull-Rom) lookup with bidirectional [0, 1) phase wrapping. */
+    float read (int frame, int mip, double phase) const noexcept
+    {
+        frame = std::clamp (frame, 0, nFrames - 1);
+        mip   = std::clamp (mip, 0, kMips - 1);
+        return readFast (table (frame, mip), wrapPhase01 (phase));
+    }
+
     float read (int frame, int mip, float phase) const noexcept
     {
         return read (frame, mip, (double) phase);
     }
 
-    /** Continuous morph position 0..1 across all frames (smooth cross-table morphing). */
+    /** Continuous morph position 0..1 across all frames (computes index & fraction once for both frames). */
     float readMorph (float morph, int mip, double phase) const noexcept
     {
-        if (nFrames < 2) return read (0, mip, phase);
+        mip = std::clamp (mip, 0, kMips - 1);
+        const double p = (phase >= 0.0 && phase < 1.0) ? phase : wrapPhase01 (phase);
+        const double x = p * (double) kSize;
+        const int i = std::min ((int) x, kSize - 1);
+        const float frac = (float) (x - (double) i);
+        if (nFrames < 2) return readFast (table (0, mip), i, frac);
         const float pos = clamp01 (morph) * (float) (nFrames - 1);
         const int a = std::min ((int) pos, nFrames - 2);
-        const float f = pos - (float) a;
-        return lerp (read (a, mip, phase), read (a + 1, mip, phase), f);
+        const float mf = pos - (float) a;
+        const float ya = readFast (table (a, mip), i, frac);
+        const float yb = readFast (table (a + 1, mip), i, frac);
+        return ya + mf * (yb - ya);
+    }
+
+    /** Pre-resolved table pointers for zero-overhead per-sample Hermite morph+mip reads inside a sub-block. */
+    struct ResolvedSlice
+    {
+        const float* hiA = nullptr;
+        const float* hiB = nullptr;
+        const float* loA = nullptr;
+        const float* loB = nullptr;
+        float mf = 0.0f;
+        float wLower = 0.0f;
+        bool hasMorph = false;
+        bool hasLower = false;
+
+        inline float eval (double phase) const noexcept
+        {
+            const double p = (phase >= 0.0 && phase < 1.0) ? phase : wrapPhase01 (phase);
+            const double x = p * (double) kSize;
+            const int i = std::min ((int) x, kSize - 1);
+            const float f = (float) (x - (double) i);
+            const float f2 = f * f, f3 = f2 * f;
+            const float w0 = -0.5f * f + f2 - 0.5f * f3;
+            const float w1 =  1.0f - 2.5f * f2 + 1.5f * f3;
+            const float w2 =  0.5f * f + 2.0f * f2 - 1.5f * f3;
+            const float w3 = -0.5f * f2 + 0.5f * f3;
+            auto h4 = [i, w0, w1, w2, w3] (const float* __restrict t) noexcept
+            {
+                return w0 * t[i - 1] + w1 * t[i] + w2 * t[i + 1] + w3 * t[i + 2];
+            };
+            float yHi = h4 (hiA);
+            if (hasMorph) yHi += mf * (h4 (hiB) - yHi);
+            if (! hasLower) return yHi;
+            float yLo = h4 (loA);
+            if (hasMorph) yLo += mf * (h4 (loB) - yLo);
+            return yHi + wLower * (yLo - yHi);
+        }
+    };
+
+    ResolvedSlice resolveSlice (float morph, int mip, float wLower) const noexcept
+    {
+        ResolvedSlice s;
+        mip = std::clamp (mip, 0, kMips - 1);
+        s.hasLower = (wLower > 0.0f && mip > 0);
+        s.wLower = wLower;
+        if (nFrames < 2)
+        {
+            s.hiA = table (0, mip);
+            if (s.hasLower) s.loA = table (0, mip - 1);
+            return s;
+        }
+        const float pos = clamp01 (morph) * (float) (nFrames - 1);
+        const int a = std::min ((int) pos, nFrames - 2);
+        s.mf = pos - (float) a;
+        s.hasMorph = (s.mf > 1.0e-5f);
+        s.hiA = table (a, mip);
+        s.hiB = table (a + 1, mip);
+        if (s.hasLower) { s.loA = table (a, mip - 1); s.loB = table (a + 1, mip - 1); }
+        return s;
+    }
+
+    /** Fused cross-frame morph + cross-mip blend: computes phase wrap, index, and Hermite weights once. */
+    float readMorphBlend (float morph, int mip, float wLower, double phase) const noexcept
+    {
+        return resolveSlice (morph, mip, wLower).eval (phase);
     }
 
     float readMorph (float morph, int mip, float phase) const noexcept
@@ -152,8 +231,46 @@ struct WavetableOsc
 
     float table (double p, float morph, int mip, float wLower) const noexcept
     {
-        float y = bank->readMorph (morph, mip, p);
-        if (wLower > 0.0f) y += wLower * (bank->readMorph (morph, mip - 1, p) - y);
+        return bank->readMorphBlend (morph, mip, wLower, p);
+    }
+
+    /** Fast path with pre-resolved WavetableBank::ResolvedSlice (avoids per-sample pointer & clamp math). */
+    float processResolved (double dt, const WavetableBank::ResolvedSlice& sl, float pw, double tzfm = 0.0) noexcept
+    {
+        pw = std::clamp (pw, 0.03f, 0.97f);
+        if (tzfm != 0.0)
+        {
+            phase += tzfm;
+            if (phase >= 1.0) { phase -= 1.0; if (phase >= 1.0) phase = wrapPhase01 (phase); }
+            else if (phase < 0.0) { phase += 1.0; if (phase < 0.0) phase = wrapPhase01 (phase); }
+        }
+        const float phF = (float) phase;
+        const float a1 = 0.5f / pw, a2 = 0.5f / (1.0f - pw);
+        const double p = phF < pw ? phase * (double) a1 : 0.5 + (phase - (double) pw) * (double) a2;
+        float y = sl.eval (p);
+
+        const float dtAbs = (float) std::clamp (std::abs (dt + tzfm), 1.0e-7, 0.48);
+        if (std::abs (a1 - a2) > 1.0e-3f)
+        {
+            auto slope = [&] (double at)
+            {
+                constexpr double h = 1.0 / (double) WavetableBank::kSize;
+                return (sl.eval (at + h) - sl.eval (at - h)) * (0.5f * (float) WavetableBank::kSize);
+            };
+            const float win = 2.0f * dtAbs;
+            const float invDt = 1.0f / dtAbs;
+            const float dk = phF - pw;
+            if (std::abs (dk) < win)
+                y += slope (0.5) * dtAbs * (a2 - a1) * polyBlamp4 (dk * invDt);
+            if (phF < win)
+                y += slope (0.0) * dtAbs * (a1 - a2) * polyBlamp4 (phF * invDt);
+            else if (phF > 1.0f - win)
+                y += slope (0.0) * dtAbs * (a1 - a2) * polyBlamp4 ((phF - 1.0f) * invDt);
+        }
+
+        phase += dt;
+        if (phase >= 1.0) phase -= 1.0;
+        if (phase < 0.0 || phase >= 1.0) phase = wrapPhase01 (phase);
         return y;
     }
 
@@ -167,7 +284,11 @@ struct WavetableOsc
 
         // Apply Through-Zero FM step before reading so constant-beta TZFM matches exact analytical Bessel phase
         if (tzfm != 0.0)
-            phase = wrapPhase01 (phase + tzfm);
+        {
+            phase += tzfm;
+            if (phase >= 1.0) { phase -= 1.0; if (phase >= 1.0) phase = wrapPhase01 (phase); }
+            else if (phase < 0.0) { phase += 1.0; if (phase < 0.0) phase = wrapPhase01 (phase); }
+        }
 
         const float phF = (float) phase;
         const float a1 = 0.5f / pw, a2 = 0.5f / (1.0f - pw);   // phase-map slopes either side of the knee
@@ -197,7 +318,9 @@ struct WavetableOsc
                 y += slope (0.0) * dtAbs * (a1 - a2) * polyBlamp4 ((phF - 1.0f) * invDt);
         }
 
-        phase = wrapPhase01 (phase + dt);
+        phase += dt;
+        if (phase >= 1.0) phase -= 1.0;
+        if (phase < 0.0 || phase >= 1.0) phase = wrapPhase01 (phase);
         return y;
     }
 };

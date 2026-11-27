@@ -27,11 +27,16 @@ VesselProcessor::VesselProcessor()
     // voice that sounded, i.e. on the audio thread: ~720 kB of allocation and 88 inverse FFTs mid-callback.)
     WavetableBank::get();
 
+    floatPids.reserve (NUM_PARAMS);
     for (int i = 0; i < NUM_PARAMS; ++i)
     {
         params[(size_t) i] = apvts.getParameter (spec (i).id);
-        jassert (params[(size_t) i] != nullptr);
+        rawParams[(size_t) i] = apvts.getRawParameterValue (spec (i).id);
+        jassert (params[(size_t) i] != nullptr && rawParams[(size_t) i] != nullptr);
+        paramRanges[(size_t) i] = params[(size_t) i]->getNormalisableRange();
         smoothed[(size_t) i] = spec (i).type == PType::Float && spec (i).step <= 0.0f;
+        lastRawBits[(size_t) i] = 0xFFFFFFFFu;
+        if (spec (i).type == PType::Float) floatPids.push_back (i);
     }
 
     resetDrawTables();
@@ -87,6 +92,13 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     ott.prepare (fs, kChunk);
     mono.prepare (fs, kChunk);
     ducker.prepare (fs);
+    organicBus.prepare (fs, kChunk);
+    textureBus.prepare (fs);
+    for (int c = 0; c < 2; ++c)
+    {
+        bodyDc1[c].setup (12.0, 0.54119610, sampleRate); bodyDc1[c].reset();
+        bodyDc2[c].setup (12.0, 1.30656296, sampleRate); bodyDc2[c].reset();
+    }
     outStage.prepare (fs, kChunk);
     subAlign.prepare (256);
     convMixS.prepare (fs, 30.0f); convMixS.snap (0.0f);
@@ -94,6 +106,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     resMonoNote = -1;
     mwRaw = atRaw = velRaw = mwS = atS = velS = bendRaw = bendS = 0.0f;
     scopeDecim = 0.0f; peakHoldL = peakHoldR = 0.0f;
+    samplePos = 0; ctrlRem = 0; busRem = 0; bodyQuietSamples = 0; voiceOsIdle = true; busVoiceActive = false; busLowestHeld = -1; midiDirty = false;
     for (auto* f : { &fGran, &fUnmask, &fCrush, &fVhs, &fFollow, &fFormant, &fOtt, &fMono, &fRes }) f->prepare (fs);
     for (auto& l : lfos) l.reset();
 
@@ -114,11 +127,39 @@ int VesselProcessor::totalLatency() const
     return (int) std::lround (ruin.latency() + outStage.latency());
 }
 
+void VesselProcessor::setQaDeterministicSeed (uint32_t seed) noexcept
+{
+    voices.reseed (seed);
+    for (int l = 0; l < kNumLfos; ++l) lfos[(size_t) l].reseed (seed ^ (uint32_t) (11 + l * 13));
+    drone.reseed (seed);
+    noise.reseed (seed);
+    granular.reseed (seed);
+    vhs.reseed (seed);
+    resonator.reseed (seed);
+    organicBus.reseed (seed);
+    textureBus.reseed (seed);
+    if (voiceOs) voiceOs->reset();
+    for (int c = 0; c < 2; ++c) { bodyDc1[c].reset(); bodyDc2[c].reset(); }
+    samplePos = 0;
+    ctrlRem = 0;
+    busRem = 0;
+    bodyQuietSamples = 0;
+    voiceOsIdle = true;
+    busVoiceActive = false;
+    busLowestHeld = -1;
+}
+
 /** Fresh start (prepare, state load): smoothers and bypass fades jump to the current values. */
 void VesselProcessor::snapToCurrentState()
 {
     snapPending.store (false, std::memory_order_relaxed);
-    for (int i = 0; i < NUM_PARAMS; ++i) base[(size_t) i] = params[(size_t) i]->getValue();
+    for (int i = 0; i < NUM_PARAMS; ++i)
+    {
+        const float raw = rawParams[(size_t) i]->load (std::memory_order_relaxed);
+        lastRawBits[(size_t) i] = std::bit_cast<uint32_t> (raw);
+        targetNorm[(size_t) i] = base[(size_t) i] = busBase[(size_t) i] = paramRanges[(size_t) i].convertTo0to1 (raw);
+    }
+    busMod.fill (0.0f);
     baseReady = true;
     fGran.snap (pb (gran_on)); fUnmask.snap (pb (unmask_on)); fCrush.snap (pb (crush_on)); fVhs.snap (pb (vhs_on));
     fFollow.snap (pb (envf_on)); fFormant.snap (pb (form_on)); fOtt.snap (pb (ott_on)); fMono.snap (pb (mono_on));
@@ -156,6 +197,8 @@ void VesselProcessor::handleMidi (const juce::MidiMessage& m)
         const int note = m.getNoteNumber();
         velRaw = m.getFloatVelocity();
         voices.noteOn (note, velRaw);
+        textureBus.noteOn (note, velRaw);
+        midiDirty = true;
         if (fromSilence) tape.noteOnFromSilence (tp);
         if (pb (duck_on)) ducker.trigger();
         for (int l = 0; l < kNumLfos; ++l) lfos[(size_t) l].trigger (pc (lfoExt (l)), fromSilence);
@@ -218,14 +261,28 @@ void VesselProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     if (n > 0)
         for (int c = getTotalNumInputChannels(); c < buffer.getNumChannels(); ++c) buffer.clear (c, 0, n);
 
+    auto renderSpan = [&] (int from, int to)
+    {
+        int p = from;
+        while (p < to)
+        {
+            const bool isBusTick = (busRem == 0);
+            if (isBusTick) busRem = kChunk;
+            const int len = std::min (busRem, to - p);
+            renderChunk (buffer, p, len, isBusTick, kChunk);
+            busRem -= len;
+            p += len;
+        }
+    };
+
     int pos = 0;
     for (const auto meta : midi)
     {
         const int at = juce::jlimit (0, std::max (0, n), meta.samplePosition);
-        while (pos < at) { const int len = std::min (kChunk, at - pos); renderChunk (buffer, pos, len); pos += len; }
+        if (pos < at) { renderSpan (pos, at); pos = at; }
         handleMidi (meta.getMessage());
     }
-    while (pos < n) { const int len = std::min (kChunk, n - pos); renderChunk (buffer, pos, len); pos += len; }
+    if (pos < n) renderSpan (pos, n);
 
     if (n <= 0) return;
 
@@ -253,9 +310,16 @@ void VesselProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 void VesselProcessor::smoothControls (int n)
 {
     const float a = std::exp (-(float) n / (0.020f * (float) sr));
-    for (int i = 0; i < NUM_PARAMS; ++i)
+    for (const int i : floatPids)
     {
-        const float target = params[(size_t) i]->getValue();
+        const float raw = rawParams[(size_t) i]->load (std::memory_order_relaxed);
+        const uint32_t bits = std::bit_cast<uint32_t> (raw);
+        if (bits != lastRawBits[(size_t) i])
+        {
+            lastRawBits[(size_t) i] = bits;
+            targetNorm[(size_t) i] = paramRanges[(size_t) i].convertTo0to1 (raw);
+        }
+        const float target = targetNorm[(size_t) i];
         auto& b = base[(size_t) i];
         b = smoothed[(size_t) i] ? target + a * (b - target) : target;
     }
@@ -280,6 +344,7 @@ bool isVoiceParam (int pid)
         case flt_a_cut: case flt_a_res: case flt_b_cut: case flt_b_res: case flt_drive: case flt_env: case flt_key:
         case fm_fine: case fm_index: case fm_feedback: case fm_env: case fm_decay: case fm_key:
         case amp_a: case amp_d: case amp_s: case amp_r: case fenv_a: case fenv_d: case fenv_s: case fenv_r: case glide:
+        case v2_organic_amt:
             return true;
         default: return false;
     }
@@ -308,6 +373,7 @@ void setVoiceField (VoiceParams& v, int pid, float x, float tuneWithoutFine)
         case fm_fine: v.fmFine = x; break;          case fm_index: v.fmIndex = x; break;
         case fm_feedback: v.fmFb = x; break;        case fm_env:   v.fmEnv = x; break;
         case fm_decay: v.fmDecay = x; break;        case fm_key:   v.fmKey = x; break;
+        case v2_organic_amt: v.organicAmt = x; break;
         default: break;
     }
 }
@@ -391,6 +457,7 @@ void VesselProcessor::buildVoiceParams()
     vp.fmEnv = pv (fm_env); vp.fmDecay = pv (fm_decay); vp.fmKey = pv (fm_key);
     vp.bend = bendS;
     vp.velAmp = pv (vel_amp);
+    vp.organicAmt = pv (v2_organic_amt);
 
     int vDest[2] { -1, -1 };
     float vAmt[2] { 0.0f, 0.0f };
@@ -432,60 +499,149 @@ void VesselProcessor::faded (BypassFade& f, bool on, int n, Fn&& process)
     }
 }
 
-void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int n)
+void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int n, bool isBusTick, int busSpan)
 {
     const float fs = (float) sr;
-    const double ppqNow = ppqBlock + (double) (start + n) / sr * bpm / 60.0;
-    smoothControls (n);
-
-    // ── expression first, so mod wheel / aftertouch / velocity can also drive LFO rate, warp and depth;
-    //    then (20) LFOs → modulation offsets (normalised, ±0.5 range at full depth)
-    std::fill (mod.begin(), mod.end(), 0.0f);
-    applyExpression();
-    applyMacros();
-    for (int l = 0; l < kNumLfos; ++l)
-    {
-        const int b0 = lfoBase (l), e0 = lfoExt (l);
-        WarpedLfo::Params lp;
-        lp.rateHz = pv (b0 + 1); lp.warp = pv (b0 + 4); lp.shape = pc (b0); lp.synced = pb (b0 + 2);
-        lp.beatsPerCycle = divisionBeats (pc (b0 + 3));
-        lp.mode = pc (e0); lp.phaseOffset = pv (e0 + 1); lp.fadeSec = pv (e0 + 2); lp.smooth = pv (e0 + 3);
-        lp.unipolar = pb (e0 + 4);
-        const float v = lfos[(size_t) l].advance (n, fs, lp, drawTables[(size_t) l], playing, ppqNow);
-        telemetry.lfoValue[l].store (v, std::memory_order_relaxed);
-        telemetry.lfoPhase[l].store (lfos[(size_t) l].currentPhase(), std::memory_order_relaxed);
-        // bipolar: ±amount/2 around the knob (full depth spans the range); unipolar: 0..amount, like expression
-        const float scale = lp.unipolar ? 1.0f : 0.5f;
-        for (int s = 0; s < kLfoSlots; ++s)
-        {
-            const int dest = destIndexToPid (pc (lfoDestPid (l, s)));
-            if (dest >= 0) mod[(size_t) dest] += pv (lfoAmtPid (l, s)) * v * scale;
-        }
-    }
-
-    // ── (1)(5)(11) voices oversampled, decimated once for body L/R + sub together (shared filter = shared phase)
-    buildVoiceParams();
     voices.setMode (pc (voice_mode));
     if (const int t = pc (wt_table); t != tableAsked) { tables.request (t); tableAsked = t; }   // lock-free; loads in the background
     voices.setTable (tables.acquireAudio());
+
+    // ── (1)(5)(11) voices oversampled in one kChunk<=64 batch, with inner kControlStep=8 fixed-grid modulation
+    const bool anyVoiceStart = voices.anyActive();
+    if (anyVoiceStart) { voiceOsIdle = false; bodyQuietSamples = 0; }
+    const bool runVoiceOs = ! voiceOsIdle;
+
+    float* upBodyL = nullptr; float* upBodyR = nullptr; float* upSub = nullptr;
+    juce::dsp::AudioBlock<float> upBlock;
+    if (runVoiceOs)
     {
         float* zc[3] { zeros.data(), zeros.data(), zeros.data() };
         juce::dsp::AudioBlock<float> zin (zc, 3, (size_t) n);
-        auto up = voiceOs->processSamplesUp (zin);
-        const int n2 = (int) up.getNumSamples();
-        up.clear();
-        voices.render (up.getChannelPointer (0), up.getChannelPointer (1), up.getChannelPointer (2), n2, voiceParams,
-                       pb (flt_on), pc (flt_route));
+        upBlock = voiceOs->processSamplesUp (zin);
+        upBlock.clear();
+        upBodyL = upBlock.getChannelPointer (0);
+        upBodyR = upBlock.getChannelPointer (1);
+        upSub   = upBlock.getChannelPointer (2);
+    }
+
+    int subPos = 0;
+    while (subPos < n)
+    {
+        const bool isCtrlTick = (ctrlRem == 0);
+        if (isCtrlTick) ctrlRem = kControlStep;
+        const int subLen = std::min (ctrlRem, n - subPos);
+
+        if (isCtrlTick)
+        {
+            const double ppqNow = ppqBlock + (double) (start + subPos + kControlStep) / sr * bpm / 60.0;
+            smoothControls (kControlStep);
+
+            std::fill (mod.begin(), mod.end(), 0.0f);
+            applyExpression();
+            applyMacros();
+            for (int l = 0; l < kNumLfos; ++l)
+            {
+                const int b0 = lfoBase (l), e0 = lfoExt (l);
+                WarpedLfo::Params lp;
+                lp.rateHz = pv (b0 + 1); lp.warp = pv (b0 + 4); lp.shape = pc (b0); lp.synced = pb (b0 + 2);
+                lp.beatsPerCycle = divisionBeats (pc (b0 + 3));
+                lp.mode = pc (e0); lp.phaseOffset = pv (e0 + 1); lp.fadeSec = pv (e0 + 2); lp.smooth = pv (e0 + 3);
+                lp.unipolar = pb (e0 + 4);
+                const float v = lfos[(size_t) l].advance (kControlStep, fs, lp, drawTables[(size_t) l], playing, ppqNow);
+                if (isBusTick && subPos == 0)
+                {
+                    telemetry.lfoValue[l].store (v, std::memory_order_relaxed);
+                    telemetry.lfoPhase[l].store (lfos[(size_t) l].currentPhase(), std::memory_order_relaxed);
+                }
+                const float scale = lp.unipolar ? 1.0f : 0.5f;
+                for (int s = 0; s < kLfoSlots; ++s)
+                {
+                    const int dest = destIndexToPid (pc (lfoDestPid (l, s)));
+                    if (dest >= 0) mod[(size_t) dest] += pv (lfoAmtPid (l, s)) * v * scale;
+                }
+            }
+            if (isBusTick && subPos == 0)
+            {
+                busBase = base;
+                busMod = mod;
+                busVoiceActive = voices.anyActive();
+                busLowestHeld = voices.lowestHeld();
+            }
+            if (voices.anyActive()) buildVoiceParams();
+            midiDirty = false;
+        }
+        else if (midiDirty)
+        {
+            if (voices.anyActive()) buildVoiceParams();
+            midiDirty = false;
+        }
+
+        if (runVoiceOs)
+        {
+            if (voices.anyActive())
+            {
+                const int osOff = subPos * VoiceManager::kOs;
+                const int osLen = subLen * VoiceManager::kOs;
+                voices.renderSlice (upBodyL + osOff, upBodyR + osOff, upSub + osOff, osLen,
+                                    voiceParams, pb (flt_on), pc (flt_route), isCtrlTick, kControlStep * VoiceManager::kOs);
+            }
+            else
+            {
+                voices.snapFilter (pb (flt_on));
+            }
+        }
+
+        ctrlRem -= subLen;
+        samplePos += (uint64_t) subLen;
+        subPos += subLen;
+    }
+
+    if (runVoiceOs)
+    {
         float* oc[3] { bodyL.data(), bodyR.data(), subB.data() };
         juce::dsp::AudioBlock<float> out (oc, 3, (size_t) n);
         voiceOs->processSamplesDown (out);
+
+        // Post-voice 64-bit 4th-order 12 Hz Butterworth DC hygiene filter (-0.003 dB @ 30 Hz, -62 dB @ 2 Hz)
+        float blkPk = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            const float bl = bodyDc2[0].highpass (bodyDc1[0].highpass (bodyL[(size_t) i]));
+            const float br = bodyDc2[1].highpass (bodyDc1[1].highpass (bodyR[(size_t) i]));
+            bodyL[(size_t) i] = bl;
+            bodyR[(size_t) i] = br;
+            blkPk = std::max ({ blkPk, std::abs (bl), std::abs (br), std::abs (subB[(size_t) i]) });
+        }
+
+        // Only sleep voiceOs + bodyDc once voices are silent AND the 12 Hz HPF tail has decayed below -140 dBFS
+        if (! voices.anyActive() && blkPk < 1.0e-7f)
+        {
+            bodyQuietSamples += n;
+            if (bodyQuietSamples >= 256)
+            {
+                voiceOsIdle = true;
+                voiceOs->reset();
+                for (int c = 0; c < 2; ++c) { bodyDc1[c].reset(); bodyDc2[c].reset(); }
+            }
+        }
+        else
+        {
+            bodyQuietSamples = 0;
+        }
+    }
+    else
+    {
+        std::fill_n (bodyL.data(), n, 0.0f);
+        std::fill_n (bodyR.data(), n, 0.0f);
+        std::fill_n (subB.data(),  n, 0.0f);
+        voices.snapFilter (pb (flt_on));
     }
     std::fill_n (texL.data(), n, 0.0f); std::fill_n (texR.data(), n, 0.0f);
 
     // host audio input (multi-effect use) enters the body bus; sanitize against upstream NaN/Inf
     const int inCh = std::min (getTotalNumInputChannels(), io.getNumChannels());
-    inLevelR.to (pv (in_level), n);
-    if (inCh > 0)
+    if (isBusTick) inLevelR.to (pvBus (in_level), busSpan);
+    if (inCh > 0 && (inLevelR.cur > 0.0f || inLevelR.inc != 0.0f))
     {
         const float* il = io.getReadPointer (0, start);
         const float* ir = io.getReadPointer (inCh > 1 ? 1 : 0, start);
@@ -504,19 +660,25 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
 
     // ── (3) drone
     DroneEngine::Params dp;
-    dp.on = pb (drone_on); dp.hold = pb (drone_hold); dp.level = pv (drone_level); dp.tone = pv (drone_tone);
-    dp.motion = pv (drone_motion); dp.spread = pv (drone_spread); dp.attack = pv (drone_attack); dp.release = pv (drone_release);
+    dp.on = pb (drone_on); dp.hold = pb (drone_hold); dp.level = pvBus (drone_level); dp.tone = pvBus (drone_tone);
+    dp.motion = pvBus (drone_motion); dp.spread = pvBus (drone_spread); dp.attack = pvBus (drone_attack); dp.release = pvBus (drone_release);
     dp.octave = (pc (drone_oct) - 2) * 12;
-    drone.process (texL.data(), texR.data(), n, voices.lowestHeld(), dp);
+    drone.process (texL.data(), texR.data(), n, voices.lowestHeld(), dp, isBusTick, busSpan);
 
     // ── (4) noise injector
     NoiseInjector::Params np;
-    np.on = pb (noise_on); np.hiss = pv (noise_hiss); np.crackle = pv (noise_crackle); np.hum = pv (noise_hum);
-    np.tone = pv (noise_tone); np.dyn = pv (noise_dyn); np.mains = pc (noise_hum_freq) == 0 ? 50.0f : 60.0f;
-    noise.process (texL.data(), texR.data(), key.data(), n, np);
+    np.on = pb (noise_on); np.hiss = pvBus (noise_hiss); np.crackle = pvBus (noise_crackle); np.hum = pvBus (noise_hum);
+    np.tone = pvBus (noise_tone); np.dyn = pvBus (noise_dyn); np.mains = pc (noise_hum_freq) == 0 ? 50.0f : 60.0f;
+    noise.process (texL.data(), texR.data(), key.data(), n, np, isBusTick, busSpan);
+
+    // ── V2 procedural texture & sub-harmonic layer (0% default mix, 0 latency, 100% procedural)
+    {
+        ProceduralTextureBus::Params texp { pc (v2_tex_mode), pvBus (v2_tex_mix), pvBus (v2_tex_tone), pvBus (v2_tex_drive) };
+        textureBus.process (texL.data(), texR.data(), key.data(), n, busVoiceActive, busLowestHeld, texp, isBusTick, busSpan);
+    }
 
     // ── (23) ducker: sub punches through the texture layer
-    ducker.process (texL.data(), texR.data(), subB.data(), n, pb (duck_on), pc (duck_mode), pv (duck_depth), pv (duck_release));
+    ducker.process (texL.data(), texR.data(), subB.data(), n, pb (duck_on), pc (duck_mode), pvBus (duck_depth), pvBus (duck_release), isBusTick, busSpan);
 
     // pre-bus = body + texture
     for (int i = 0; i < n; ++i) { xL[(size_t) i] = bodyL[(size_t) i] + texL[(size_t) i]; xR[(size_t) i] = bodyR[(size_t) i] + texR[(size_t) i]; }
@@ -525,49 +687,55 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     {
         static constexpr float divs[] { 1.0f, 0.5f, 0.25f, 0.125f, 1.0f / 3.0f, 1.0f / 6.0f };
         GranularLooper::Params gp;
-        gp.freeze = pb (gran_freeze); gp.sizeMs = pv (gran_size); gp.density = pv (gran_density);
-        gp.pitch = pv (gran_pitch); gp.stretch = pv (gran_stretch); gp.spray = pv (gran_spray); gp.reverse = pv (gran_reverse);
-        gp.chance = pv (gran_chance); gp.mix = pv (gran_mix); gp.divBeats = divs[juce::jlimit (0, 5, pc (gran_div))];
-        faded (fGran, pb (gran_on), n, [&] (bool on) { gp.on = on; granular.process (xL.data(), xR.data(), n, gp); });
+        gp.freeze = pb (gran_freeze); gp.sizeMs = pvBus (gran_size); gp.density = pvBus (gran_density);
+        gp.pitch = pvBus (gran_pitch); gp.stretch = pvBus (gran_stretch); gp.spray = pvBus (gran_spray); gp.reverse = pvBus (gran_reverse);
+        gp.chance = pvBus (gran_chance); gp.mix = pvBus (gran_mix); gp.divBeats = divs[juce::jlimit (0, 5, pc (gran_div))];
+        faded (fGran, pb (gran_on), n, [&] (bool on) { gp.on = on; granular.process (xL.data(), xR.data(), n, gp, isBusTick, busSpan); });
     }
 
     // ── (13) spectral unmasking keyed by the sub
     {
-        Unmasker::Params up { true, pv (unmask_freq), pv (unmask_depth), pv (unmask_release) };
-        faded (fUnmask, pb (unmask_on), n, [&] (bool on) { up.on = on; unmask.process (xL.data(), xR.data(), subB.data(), n, up); });
+        Unmasker::Params up { true, pvBus (unmask_freq), pvBus (unmask_depth), pvBus (unmask_release) };
+        faded (fUnmask, pb (unmask_on), n, [&] (bool on) { up.on = on; unmask.process (xL.data(), xR.data(), subB.data(), n, up, isBusTick); });
     }
 
     // ── (26) physical-model resonator: before RUIN, so the tube can drive it and the clean sub stays outside it
     {
         Resonator::Params rsp;
-        rsp.model = pc (res_model); rsp.tune = pv (res_tune); rsp.decay = pv (res_decay); rsp.bright = pv (res_bright);
-        rsp.stiff = pv (res_stiff); rsp.pos = pv (res_pos); rsp.damper = pv (res_damper); rsp.input = pv (res_input);
-        rsp.strike = pv (res_strike); rsp.mix = pv (res_mix);
-        rsp.bend = bendS; rsp.glideMs = pc (voice_mode) != 0 ? pv (glide) : 0.0f;
+        rsp.model = pc (res_model); rsp.tune = pvBus (res_tune); rsp.decay = pvBus (res_decay); rsp.bright = pvBus (res_bright);
+        rsp.stiff = pvBus (res_stiff); rsp.pos = pvBus (res_pos); rsp.damper = pvBus (res_damper); rsp.input = pvBus (res_input);
+        rsp.strike = pvBus (res_strike); rsp.mix = pvBus (res_mix);
+        rsp.bend = bendS; rsp.glideMs = pc (voice_mode) != 0 ? pvBus (glide) : 0.0f;
         faded (fRes, pb (res_on), n, [&] (bool on) { rsp.on = on; resonator.process (xL.data(), xR.data(), n, rsp); });
     }
 
     // ── RUIN: sub send → (15) pre tilt → [4x: (6) tube → (15) post tilt → (10) bias] → (9) crush
-    sendR.to (pv (sub_send), n);
-    cleanR.to (1.0f - pv (sub_send), n);
+    if (isBusTick)
+    {
+        const float ss = pvBus (sub_send);
+        sendR.to (ss, busSpan);
+        cleanR.to (1.0f - ss, busSpan);
+    }
     for (int i = 0; i < n; ++i) { const float s = subB[(size_t) i] * sendR.next(); xL[(size_t) i] += s; xR[(size_t) i] += s; }
 
-    for (int c = 0; c < 2; ++c) preTilt[c].set (pv (pre_tilt), pv (pre_pivot), fs, n);
-    for (int i = 0; i < n; ++i) { xL[(size_t) i] = preTilt[0].process (xL[(size_t) i]); xR[(size_t) i] = preTilt[1].process (xR[(size_t) i]); }
+    const float preTiltDb = pvBus (pre_tilt);
+    if (isBusTick) for (int c = 0; c < 2; ++c) preTilt[c].set (preTiltDb, pvBus (pre_pivot), fs, busSpan);
+    if (std::abs (preTiltDb) > 1.0e-4f || std::abs (preTilt[0].gLo.cur - 1.0f) > 1.0e-5f || std::abs (preTilt[0].gHi.cur - 1.0f) > 1.0e-5f)
+        for (int i = 0; i < n; ++i) { xL[(size_t) i] = preTilt[0].process (xL[(size_t) i]); xR[(size_t) i] = preTilt[1].process (xR[(size_t) i]); }
+    else
+        for (int c = 0; c < 2; ++c) { preTilt[c].gLo.skip (n); preTilt[c].gHi.skip (n); }
 
     RuinCore::Params rp;
-    rp.tube = { pb (tube_on), pc (tube_mode), pv (tube_drive), pv (tube_bias), pv (tube_mix), pv (tube_out) };
-    rp.postTiltDb = pv (post_tilt); rp.postPivot = pv (post_pivot);
-    rp.bias = { pb (bias_on), pv (bias_amount), pv (bias_sag), pv (bias_sat), pv (bias_speed) };
-    ruin.process (xL.data(), xR.data(), n, rp);
+    rp.tube = { pb (tube_on), pc (tube_mode), pvBus (tube_drive), pvBus (tube_bias), pvBus (tube_mix), pvBus (tube_out) };
+    rp.postTiltDb = pvBus (post_tilt); rp.postPivot = pvBus (post_pivot);
+    rp.bias = { pb (bias_on), pvBus (bias_amount), pvBus (bias_sag), pvBus (bias_sat), pvBus (bias_speed) };
+    ruin.process (xL.data(), xR.data(), n, rp, isBusTick, busSpan);
 
     {
-        BitCrusher::Params cp { true, pv (crush_bits), pv (crush_rate), pv (crush_pre), pv (crush_post), pv (crush_mix) };
-        faded (fCrush, pb (crush_on), n, [&] (bool on) { cp.on = on; crusher.process (xL.data(), xR.data(), n, cp); });
+        BitCrusher::Params cp { true, pvBus (crush_bits), pvBus (crush_rate), pvBus (crush_pre), pvBus (crush_post), pvBus (crush_mix) };
+        faded (fCrush, pb (crush_on), n, [&] (bool on) { cp.on = on; crusher.process (xL.data(), xR.data(), n, cp, isBusTick, busSpan); });
     }
 
-    // Clean sub re-joins, delayed by the RUIN block's exact linear-phase latency (0 when RUIN is bypassed) so
-    // the sent and clean halves of the sub sum in phase: no cancellation at any send amount.
     const float ruinLat = ruin.latency();
     const float subDelay = ruinLat + 1.0f;
     float subLevelNow = 0.0f;
@@ -579,29 +747,30 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         xL[(size_t) i] += s; xR[(size_t) i] += s;
         subLevelNow = std::max (subLevelNow, std::abs (s));
     }
-    const float subDecay = std::pow (0.95f, (float) n / (float) kChunk);
-    telemetry.subLevel = flushDenormal (std::max (subLevelNow, telemetry.subLevel.load() * subDecay));
+    const float subDecay = fastExp2 (-0.07400058f * ((float) n * (1.0f / (float) kChunk)));
+    telemetry.subLevel.store (flushDenormal (std::max (subLevelNow, telemetry.subLevel.load (std::memory_order_relaxed) * subDecay)),
+                              std::memory_order_relaxed);
 
     // ── (7) VHS → (8) tape motor
     {
-        VhsTransport::Params vhp { true, pv (vhs_wow), pv (vhs_flutter), pv (vhs_drift), pv (vhs_rate), pv (vhs_age) };
-        faded (fVhs, pb (vhs_on), n, [&] (bool on) { vhp.on = on; vhs.process (xL.data(), xR.data(), n, vhp); });
+        VhsTransport::Params vhp { true, pvBus (vhs_wow), pvBus (vhs_flutter), pvBus (vhs_drift), pvBus (vhs_rate), pvBus (vhs_age) };
+        faded (fVhs, pb (vhs_on), n, [&] (bool on) { vhp.on = on; vhs.process (xL.data(), xR.data(), n, vhp, isBusTick, busSpan); });
     }
-    TapeMotor::Params tmp { (TapeMotor::Mode) pc (tape_mode), pv (tape_start), pv (tape_stop) };
+    TapeMotor::Params tmp { (TapeMotor::Mode) pc (tape_mode), pvBus (tape_start), pvBus (tape_stop) };
     tape.process (xL.data(), xR.data(), n, tmp);
 
     // ── SHAPE (global): (12) follower LPF → (14) formant
     {
-        FollowerFilter::Params fp { true, pv (envf_cut), pv (envf_depth), pv (envf_res), pv (envf_attack), pv (envf_release), pv (envf_mix) };
-        faded (fFollow, pb (envf_on), n, [&] (bool on) { fp.on = on; follower.process (xL.data(), xR.data(), n, fp); });
-        FormantFilter::Params ffp { true, pv (form_vowel), pv (form_body), pv (form_shift), pv (form_res), pv (form_mix) };
-        faded (fFormant, pb (form_on), n, [&] (bool on) { ffp.on = on; formant.process (xL.data(), xR.data(), n, ffp); });
+        FollowerFilter::Params fp { true, pvBus (envf_cut), pvBus (envf_depth), pvBus (envf_res), pvBus (envf_attack), pvBus (envf_release), pvBus (envf_mix) };
+        faded (fFollow, pb (envf_on), n, [&] (bool on) { fp.on = on; follower.process (xL.data(), xR.data(), n, fp, isBusTick, busSpan); });
+        FormantFilter::Params ffp { true, pvBus (form_vowel), pvBus (form_body), pvBus (form_shift), pvBus (form_res), pvBus (form_mix) };
+        faded (fFormant, pb (form_on), n, [&] (bool on) { ffp.on = on; formant.process (xL.data(), xR.data(), n, ffp, isBusTick, busSpan); });
     }
 
     // ── SPACE: (18) Z-axis → (17) convolution → (16) black hole → (19) Haas
-    zaxis.process (xL.data(), xR.data(), n, pb (z_on), pv (z_depth));
+    zaxis.process (xL.data(), xR.data(), n, pb (z_on), pvBus (z_depth));
 
-    convMixS.set (pb (conv_on) ? pv (conv_mix) : 0.0f);
+    convMixS.set (pb (conv_on) ? pvBus (conv_mix) : 0.0f);
     if (convMixS.target > 0.0f || convMixS.cur > 1.0e-4f)
     {
         std::copy_n (xL.data(), n, wetL.data()); std::copy_n (xR.data(), n, wetR.data());
@@ -616,24 +785,29 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         }
     }
 
-    BlackHole::Params bh { pb (verb_on), pb (verb_inf), pv (verb_size), pv (verb_decay), pv (verb_damp), pv (verb_mod), pv (verb_pre), pv (verb_low), pv (verb_mix) };
-    blackHole.process (xL.data(), xR.data(), n, bh);
+    BlackHole::Params bh { pb (verb_on), pb (verb_inf), pvBus (verb_size), pvBus (verb_decay), pvBus (verb_damp), pvBus (verb_mod), pvBus (verb_pre), pvBus (verb_low), pvBus (verb_mix) };
+    blackHole.process (xL.data(), xR.data(), n, bh, isBusTick);
 
-    haas.process (xL.data(), xR.data(), n, pb (haas_on), pv (haas_time), pv (haas_width), pv (haas_xover));
+    haas.process (xL.data(), xR.data(), n, pb (haas_on), pvBus (haas_time), pvBus (haas_width), pvBus (haas_xover));
 
-    // ── PRESSURE: (21) multiband → (22) mono collapse → [4x: (24) exciter → output gain → (25) clipper]
+    // ── PRESSURE: (21) multiband → (22) mono collapse → V2 Organic Bus → [4x: (24) exciter → output gain → (25) clipper]
     {
         MultibandOtt::Params op;
-        op.depth = pv (ott_depth); op.time = pv (ott_time); op.up = pv (ott_up); op.down = pv (ott_down);
-        op.lox = pv (ott_lox); op.hix = pv (ott_hix); op.lowDb = pv (ott_low); op.midDb = pv (ott_mid); op.highDb = pv (ott_high);
-        op.inDb = pv (ott_in); op.outDb = pv (ott_out);
-        faded (fOtt, pb (ott_on), n, [&] (bool on) { op.on = on; ott.process (xL.data(), xR.data(), n, op); });
-        const float mf = pv (mono_freq);
+        op.depth = pvBus (ott_depth); op.time = pvBus (ott_time); op.up = pvBus (ott_up); op.down = pvBus (ott_down);
+        op.lox = pvBus (ott_lox); op.hix = pvBus (ott_hix); op.lowDb = pvBus (ott_low); op.midDb = pvBus (ott_mid); op.highDb = pvBus (ott_high);
+        op.inDb = pvBus (ott_in); op.outDb = pvBus (ott_out);
+        faded (fOtt, pb (ott_on), n, [&] (bool on) { op.on = on; ott.process (xL.data(), xR.data(), n, op, isBusTick, busSpan); });
+        const float mf = pvBus (mono_freq);
         faded (fMono, pb (mono_on), n, [&] (bool on) { mono.process (xL.data(), xR.data(), n, on, mf); });
     }
 
-    OutputStage::Params osp { pb (exc_on), pv (exc_freq), pv (exc_amount), pv (exc_harm), pb (clip_on), pv (clip_ceiling), pv (out_gain) };
-    outStage.process (xL.data(), xR.data(), n, osp);
+    {
+        OrganicBus::Params orgp { pvBus (v2_organic_amt), pvBus (v2_organic_floor), pb (v2_organic_mono) };
+        organicBus.process (xL.data(), xR.data(), n, busVoiceActive, orgp, isBusTick, busSpan);
+    }
+
+    OutputStage::Params osp { pb (exc_on), pvBus (exc_freq), pvBus (exc_amount), pvBus (exc_harm), pb (clip_on), pvBus (clip_ceiling), pvBus (out_gain) };
+    outStage.process (xL.data(), xR.data(), n, osp, isBusTick, busSpan);
 
     // ── sanitize output + write out + telemetry
     for (int i = 0; i < n; ++i)
@@ -673,8 +847,9 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     }
     telemetry.scopeWrite.store (w, std::memory_order_release);
     const float r = std::sqrt (sumSq / (2.0f * (float) n));
-    const float rmsKeep = std::pow (0.9f, (float) n / (float) kChunk);
-    telemetry.rms = flushDenormal (rmsKeep * telemetry.rms.load() + (1.0f - rmsKeep) * r);
+    const float rmsKeep = fastExp2 (-0.15200309f * ((float) n * (1.0f / (float) kChunk)));   // 0.9^(n/kChunk)
+    telemetry.rms.store (flushDenormal (rmsKeep * telemetry.rms.load (std::memory_order_relaxed) + (1.0f - rmsKeep) * r),
+                         std::memory_order_relaxed);
 }
 
 //==============================================================================

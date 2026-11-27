@@ -295,16 +295,29 @@ public:
         head[0].reset(); head[1].reset();
         kR.reset(); isR.reset(); hystR.reset(); amtR.reset(); sagR.reset();
         env.reset();
+        lastSpeedMs = -1.0f; lastSat = -1.0f;
     }
 
-    void process (float* l, float* r, int m, const Params& p)
+    void process (float* l, float* r, int m, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
-        env.setTimes (4.0f, p.speedMs, sr);
-        const float kT = 1.0f + p.sat * 5.0f;
-        kR.to (kT, m); isR.to (1.0f / std::sqrt (kT), m);
-        hystR.to (0.35f * p.sat, m); amtR.to (0.3f * p.amount, m); sagR.to (p.sag, m);
-        const float hf = std::min (20000.0f * (1.0f - 0.55f * p.sat), 0.45f * sr);
-        head[0].setCutoff (hf, sr); head[1].setCutoff (hf, sr);
+        if (ctrlSpan <= 0) ctrlSpan = m;
+        if (isCtrlTick)
+        {
+            if (std::abs (p.speedMs - lastSpeedMs) > 1.0e-4f)
+            {
+                lastSpeedMs = p.speedMs;
+                env.setTimes (4.0f, p.speedMs, sr);
+            }
+            const float kT = 1.0f + p.sat * 5.0f;
+            kR.to (kT, ctrlSpan); isR.to (1.0f / std::sqrt (kT), ctrlSpan);
+            hystR.to (0.35f * p.sat, ctrlSpan); amtR.to (0.3f * p.amount, ctrlSpan); sagR.to (p.sag, ctrlSpan);
+            if (std::abs (p.sat - lastSat) > 1.0e-5f)
+            {
+                lastSat = p.sat;
+                const float hf = std::min (20000.0f * (1.0f - 0.55f * p.sat), 0.45f * sr);
+                head[0].setCutoff (hf, sr); head[1].setCutoff (hf, sr);
+            }
+        }
 
         for (int i = 0; i < m; ++i)
         {
@@ -341,7 +354,7 @@ public:
     }
 
 private:
-    float sr = 192000.0f;
+    float sr = 192000.0f, lastSpeedMs = -1.0f, lastSat = -1.0f;
     double y1[2] {}, xPrev[2] {};
     EnvFollower env;
     DcBlocker dc[2];
@@ -396,13 +409,23 @@ public:
         resetPads();
     }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! osActive && ! p.tube.on && ! p.bias.on)
         {
             // True 0-latency 1x bypass path (linear post-tilt only)
-            tilt[0].set (p.postTiltDb, p.postPivot, baseSr, n);
-            tilt[1].set (p.postTiltDb, p.postPivot, baseSr, n);
+            if (isCtrlTick)
+            {
+                tilt[0].set (p.postTiltDb, p.postPivot, baseSr, ctrlSpan);
+                tilt[1].set (p.postTiltDb, p.postPivot, baseSr, ctrlSpan);
+            }
+            if (std::abs (p.postTiltDb) < 1.0e-4f && std::abs (tilt[0].gLo.cur - 1.0f) < 1.0e-5f && std::abs (tilt[0].gHi.cur - 1.0f) < 1.0e-5f)
+            {
+                tilt[0].gLo.skip (n); tilt[0].gHi.skip (n);
+                tilt[1].gLo.skip (n); tilt[1].gHi.skip (n);
+                return;
+            }
             for (int i = 0; i < n; ++i) { l[i] = tilt[0].process (l[i]); r[i] = tilt[1].process (r[i]); }
             return;
         }
@@ -417,13 +440,17 @@ public:
 
         os.processUp (l, r, n);
         const int m = n * 4;
+        const int mCtrl = ctrlSpan * 4;
         float* ul = os.upL();
         float* ur = os.upR();
 
         tube.process (ul, ur, m, p.tube);
 
-        tilt[0].set (p.postTiltDb, p.postPivot, osr, m);
-        tilt[1].set (p.postTiltDb, p.postPivot, osr, m);
+        if (isCtrlTick)
+        {
+            tilt[0].set (p.postTiltDb, p.postPivot, osr, mCtrl);
+            tilt[1].set (p.postTiltDb, p.postPivot, osr, mCtrl);
+        }
         for (int i = 0; i < m; ++i) { ul[i] = tilt[0].process (ul[i]); ur[i] = tilt[1].process (ur[i]); }
 
         const bool on = p.bias.on;
@@ -432,7 +459,7 @@ public:
             auto* dl = dry.getWritePointer (0);
             auto* dr = dry.getWritePointer (1);
             std::copy_n (ul, m, dl); std::copy_n (ur, m, dr);
-            bias.process (ul, ur, m, p.bias);
+            bias.process (ul, ur, m, p.bias, isCtrlTick, mCtrl);
             for (int i = 0; i < m; ++i)
             {
                 const float g = biasFade.next (on);
@@ -440,7 +467,7 @@ public:
                 ur[i] = dr[i] + g * (ur[i] - dr[i]);
             }
         }
-        else if (on) bias.process (ul, ur, m, p.bias);
+        else if (on) bias.process (ul, ur, m, p.bias, isCtrlTick, mCtrl);
 
         if (pad4x > 0)
         {
@@ -490,19 +517,23 @@ public:
         mixR.reset(); preR.reset();
     }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! p.on) return;
         const float rate = std::min (p.rate, sr);
-        for (int c = 0; c < 2; ++c)
+        if (isCtrlTick)
         {
-            preA[c].setup (rate * 0.45f, 0.7f, sr);
-            preB[c].setup (rate * 0.45f, 0.7f, sr);
-            post[c].setup (lerp (20000.0f, rate * 0.5f, p.post), 0.7f, sr);
+            for (int c = 0; c < 2; ++c)
+            {
+                preA[c].setup (rate * 0.45f, 0.7f, sr);
+                preB[c].setup (rate * 0.45f, 0.7f, sr);
+                post[c].setup (lerp (20000.0f, rate * 0.5f, p.post), 0.7f, sr);
+            }
+            mixR.to (p.mix, ctrlSpan); preR.to (p.pre, ctrlSpan);
         }
-        const float levels = std::exp2 (p.bits - 1.0f);
+        const float levels = fastExp2 (p.bits - 1.0f);
         const float inc = rate / sr;
-        mixR.to (p.mix, n); preR.to (p.pre, n);
 
         for (int i = 0; i < n; ++i)
         {
@@ -553,17 +584,29 @@ public:
         rng.seed (5150u);
     }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void reseed (uint32_t seedVal) noexcept
     {
+        slow.reseed (seedVal ^ 11u);
+        fast.reseed (seedVal ^ 23u);
+        wowDrift.reseed (seedVal ^ 37u);
+        rng.seed (seedVal ^ 5150u);
+    }
+
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
+    {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! p.on)
         {   // keep the tape loop fed, so switching on (under the bypass crossfade) never replays stale audio
             for (int i = 0; i < n; ++i) { dl[0].push (l[i]); dl[1].push (r[i]); }
             return;
         }
         const float base = 0.012f * sr;
-        wowR.to (p.wow * 0.0035f * sr, n); driftR.to (p.drift * 0.005f * sr, n); flutR.to (p.flutter * 0.00028f * sr, n);
-        const float ageHz = 20000.0f * std::pow (0.2f, p.age);
-        lp[0].setup (ageHz, 0.6f, sr); lp[1].setup (ageHz, 0.6f, sr);
+        if (isCtrlTick)
+        {
+            wowR.to (p.wow * 0.0035f * sr, ctrlSpan); driftR.to (p.drift * 0.005f * sr, ctrlSpan); flutR.to (p.flutter * 0.00028f * sr, ctrlSpan);
+            const float ageHz = 20000.0f * std::pow (0.2f, p.age);
+            lp[0].setup (ageHz, 0.6f, sr); lp[1].setup (ageHz, 0.6f, sr);
+        }
         const float dropRate = p.age * p.age * 0.8f / sr;
 
         for (int i = 0; i < n; ++i)

@@ -34,11 +34,25 @@ public:
         breathRng.seed (4242u);
         gate = 0.0f;
         latched = -1;
+        sampleCount = 0;
+    }
+
+    void reseed (uint32_t seedVal) noexcept
+    {
+        for (int i = 0; i < kPartials; ++i)
+        {
+            ampDrift[(size_t) i].reseed (seedVal + (uint32_t) (i * 131 + 7));
+            pitchDrift[(size_t) i].reseed (seedVal + (uint32_t) (i * 977 + 3));
+        }
+        breathRng.seed (seedVal ^ 4242u);
+        sampleCount = 0;
     }
 
     /** rootNote < 0 means nothing held. */
-    void process (float* outL, float* outR, int n, int rootNote, const Params& p)
+    void process (float* outL, float* outR, int n, int rootNote, const Params& p,
+                  bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (rootNote >= 0) latched = rootNote;
         const bool gateOn = p.on && (rootNote >= 0 || (p.hold && latched >= 0));
         const float tc = gateOn ? p.attack : p.release;
@@ -47,79 +61,73 @@ public:
         if (latched < 0 || (! gateOn && gate < 1.0e-5f)) { gate = gateOn ? gate : 0.0f; if (! gateOn) return; }
         if (noteSmooth.z <= 0.0f) noteSmooth.reset ((float) latched);
 
-        for (int k = 0; k < kPartials; ++k)
+        if (isCtrlTick)
         {
-            ampDrift[(size_t) k].setRate (0.03f + p.motion * 0.45f, sr);
-            pitchDrift[(size_t) k].setRate (0.02f + p.motion * 0.2f, sr);
-        }
-        if (gate < 1.0e-5f) levelR.snap (p.level * 0.22f);
+            for (int k = 0; k < kPartials; ++k)
+            {
+                ampDrift[(size_t) k].setRate (0.03f + p.motion * 0.45f, sr);
+                pitchDrift[(size_t) k].setRate (0.02f + p.motion * 0.2f, sr);
+            }
+            if (gate < 1.0e-5f) levelR.snap (p.level * 0.22f);
+            else levelR.to (p.level * 0.22f, ctrlSpan);
 
-        body.setup (midiToHz ((float) latched + (float) p.octave) * std::exp2 (1.5f + p.tone * 5.5f), 0.9f + p.tone * 1.5f, sr);
-        bodyR.setup (midiToHz ((float) latched + (float) p.octave) * std::exp2 (1.6f + p.tone * 5.5f), 0.9f + p.tone * 1.5f, sr);
-        breath.setup (midiToHz ((float) latched + (float) p.octave) * 4.0f, 6.0f, sr);
+            body.setup (midiToHz ((float) latched + (float) p.octave) * fastExp2 (1.5f + p.tone * 5.5f), 0.9f + p.tone * 1.5f, sr);
+            bodyR.setup (midiToHz ((float) latched + (float) p.octave) * fastExp2 (1.6f + p.tone * 5.5f), 0.9f + p.tone * 1.5f, sr);
+            breath.setup (midiToHz ((float) latched + (float) p.octave) * 4.0f, 6.0f, sr);
+        }
 
         const float morph = 0.05f + p.tone * 0.32f;   // sine → triangle → saw region of the bank
         static constexpr float offs[kPartials] { 0.0f, 0.0f, 7.0f, 12.0f, 19.0f, 24.0f };
         static constexpr float wts [kPartials] { 1.0f, 0.8f, 0.42f, 0.5f, 0.22f, 0.16f };
         static constexpr float pans[kPartials] { -0.3f, 0.3f, -0.7f, 0.6f, -0.9f, 0.9f };
-        levelR.to (p.level * 0.22f, n);
 
-        // Partials run at control rate (every 16 samples): pitch, drift, mip and gains are slow, so this removes
-        // ~30 transcendental calls per sample. Below ~120 Hz the detune is scaled down with the square of the
-        // frequency, so the root partials stay phase-locked in the sub region instead of beating against each other.
-        constexpr int kBlk = 16;
-        for (int s0 = 0; s0 < n; s0 += kBlk)
+        for (int i = 0; i < n; ++i)
         {
-            const int m = std::min (kBlk, n - s0);
             const float root = noteSmooth.process ((float) latched) + (float) p.octave;
-            for (int q = 1; q < m; ++q) noteSmooth.process ((float) latched);
-            const float rootHz = midiToHz (root);
-            const float lock = std::min (1.0f, (rootHz / 120.0f) * (rootHz / 120.0f));
-
-            float inc[kPartials], amp[kPartials], gl[kPartials], gr[kPartials];
-            int mip[kPartials];
-            for (int k = 0; k < kPartials; ++k)
+            if ((sampleCount++ & 15u) == 0u)
             {
-                const float det = ((k == 1 ? 1.0f : (k == 0 ? -1.0f : 0.0f)) * p.spread * 0.14f
-                                   + pitchDrift[(size_t) k].next (m) * p.motion * 0.09f) * (k < 2 ? lock : 1.0f);
-                const float hz = midiToHz (root + offs[k] + det);
-                if (hz >= 0.48f * sr)
-                {
-                    inc[k] = 0.0f; mip[k] = WavetableBank::kMips - 1;
-                    amp[k] = gl[k] = gr[k] = 0.0f;
-                    continue;
-                }
-                inc[k] = hz / sr;
-                mip[k] = WavetableBank::mipFor (hz, sr);
-                amp[k] = wts[k] * (1.0f - p.motion * 0.7f * (0.5f + 0.5f * ampDrift[(size_t) k].next (m)));
-                const float pan = pans[k] * p.spread;
-                gl[k] = amp[k] * std::sqrt (0.5f - 0.5f * pan);
-                gr[k] = amp[k] * std::sqrt (0.5f + 0.5f * pan);
-            }
-
-            for (int i = s0; i < s0 + m; ++i)
-            {
-                gate = flushDenormal ((gateOn ? 1.0f : 0.0f) + gCoef * (gate - (gateOn ? 1.0f : 0.0f)));
-                float l = 0.0f, r = 0.0f;
+                const float rootHz = midiToHz (root);
+                const float lock = std::min (1.0f, (rootHz / 120.0f) * (rootHz / 120.0f));
                 for (int k = 0; k < kPartials; ++k)
                 {
-                    auto& ph = phase[(size_t) k];
-                    const float sm = bank.readMorph (morph, mip[k], ph);
-                    ph += inc[k];
-                    ph -= std::floor (ph);
-                    if (! (ph >= 0.0f && ph < 1.0f)) ph = 0.0f;
-                    l += sm * gl[k];
-                    r += sm * gr[k];
+                    const float det = ((k == 1 ? 1.0f : (k == 0 ? -1.0f : 0.0f)) * p.spread * 0.14f
+                                       + pitchDrift[(size_t) k].next (16) * p.motion * 0.09f) * (k < 2 ? lock : 1.0f);
+                    const float hz = midiToHz (root + offs[k] + det);
+                    if (hz >= 0.48f * sr)
+                    {
+                        incC[k] = 0.0f; mipC[k] = WavetableBank::kMips - 1;
+                        glC[k] = grC[k] = 0.0f;
+                        continue;
+                    }
+                    incC[k] = hz / sr;
+                    mipC[k] = WavetableBank::mipFor (hz, sr);
+                    const float amp = wts[k] * (1.0f - p.motion * 0.7f * (0.5f + 0.5f * ampDrift[(size_t) k].next (16)));
+                    const float pan = pans[k] * p.spread;
+                    glC[k] = amp * std::sqrt (0.5f - 0.5f * pan);
+                    grC[k] = amp * std::sqrt (0.5f + 0.5f * pan);
                 }
-
-                const float b = breath.bandpass (breathRng.bip()) * (0.2f + 0.8f * p.motion) * 0.6f;
-                l = body.lowpass (l + b);
-                r = bodyR.lowpass (r + b);
-
-                const float g = gate * levelR.next();
-                outL[i] += l * g;
-                outR[i] += r * g;
             }
+
+            gate = flushDenormal ((gateOn ? 1.0f : 0.0f) + gCoef * (gate - (gateOn ? 1.0f : 0.0f)));
+            float l = 0.0f, r = 0.0f;
+            for (int k = 0; k < kPartials; ++k)
+            {
+                auto& ph = phase[(size_t) k];
+                const float sm = bank.readMorph (morph, mipC[k], ph);
+                ph += incC[k];
+                if (ph >= 1.0f) ph -= std::floor (ph);
+                if (! (ph >= 0.0f && ph < 1.0f)) ph = 0.0f;
+                l += sm * glC[k];
+                r += sm * grC[k];
+            }
+
+            const float b = breath.bandpass (breathRng.bip()) * (0.2f + 0.8f * p.motion) * 0.6f;
+            l = body.lowpass (l + b);
+            r = bodyR.lowpass (r + b);
+
+            const float g = gate * levelR.next();
+            outL[i] += l * g;
+            outR[i] += r * g;
         }
     }
 
@@ -127,6 +135,9 @@ private:
     static constexpr int kPartials = 6;
     float sr = 48000.0f, gate = 0.0f;
     int latched = -1;
+    uint64_t sampleCount = 0;
+    float incC[kPartials] {}, glC[kPartials] {}, grC[kPartials] {};
+    int mipC[kPartials] {};
     std::array<float, kPartials> phase {};
     std::array<Drift, kPartials> ampDrift, pitchDrift;
     OnePole noteSmooth;
@@ -161,14 +172,28 @@ public:
         rng.seed (0xC0FFEEu);
     }
 
-    void process (float* outL, float* outR, const float* key, int n, const Params& p)
+    void reseed (uint32_t seedVal) noexcept
     {
-        hissR.to (p.on ? p.hiss * p.hiss * 0.35f : 0.0f, n);
-        humR.to (p.on ? p.hum * p.hum * 0.22f : 0.0f, n);
-        crackR.to (p.on ? p.crackle : 0.0f, n);
+        humDrift.reseed (seedVal ^ 99u);
+        rng.seed (seedVal ^ 0xC0FFEEu);
+    }
+
+    void process (float* outL, float* outR, const float* key, int n, const Params& p,
+                  bool isCtrlTick = true, int ctrlSpan = 0)
+    {
+        if (ctrlSpan <= 0) ctrlSpan = n;
+        if (isCtrlTick)
+        {
+            hissR.to (p.on ? p.hiss * p.hiss * 0.35f : 0.0f, ctrlSpan);
+            humR.to (p.on ? p.hum * p.hum * 0.22f : 0.0f, ctrlSpan);
+            crackR.to (p.on ? p.crackle : 0.0f, ctrlSpan);
+        }
         if (! p.on && hissR.cur <= 0.0f && humR.cur <= 0.0f && crackR.cur <= 0.0f) return;
-        const float toneHz = 1500.0f * std::exp2 (p.tone * 3.6f);
-        for (int c = 0; c < 2; ++c) { toneLp[c].setup (toneHz, 0.6f, sr); popLp[c].setup (toneHz, 0.7f, sr); }
+        if (isCtrlTick)
+        {
+            const float toneHz = 1500.0f * fastExp2 (p.tone * 3.6f);
+            for (int c = 0; c < 2; ++c) { toneLp[c].setup (toneHz, 0.6f, sr); popLp[c].setup (toneHz, 0.7f, sr); }
+        }
 
         const float popRate = p.crackle * p.crackle * 70.0f / sr;
         const float dustRate = p.crackle * 400.0f / sr;
@@ -268,6 +293,8 @@ public:
         mixR.reset();
     }
 
+    void reseed (uint32_t seedVal) noexcept { rng.seed (seedVal ^ 777u); }
+
     /** Called once per block with the host transport, before process(). */
     void setTransport (bool playing, double ppq, double bpmIn)
     {
@@ -278,8 +305,9 @@ public:
 
     bool isLooping() const noexcept { return loopActive; }
 
-    void process (float* l, float* r, int n, const Params& p)
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
+        if (ctrlSpan <= 0) ctrlSpan = n;
         if (! p.on)
         {
             // keep recording so engaging it is instant
@@ -295,7 +323,7 @@ public:
         const float norm = 1.0f / std::pow (std::max (0.5f, 0.5f * overlap), 0.7f);
         const double beatInc = bpm / (60.0 * sr);
         const int divSamples = std::max (64, (int) (p.divBeats * 60.0 / bpm * sr));
-        mixR.to (p.mix, n);
+        if (isCtrlTick) mixR.to (p.mix, ctrlSpan);
 
         for (int i = 0; i < n; ++i)
         {

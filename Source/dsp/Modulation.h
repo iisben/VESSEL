@@ -32,10 +32,18 @@ public:
         bool unipolar = false;      // 0..1 instead of −1..1
     };
 
-    explicit WarpedLfo (uint32_t seed = 1) : rng (seed) { regenerateGlitch(); wanderA.store (rng.bip()); wanderB.store (rng.bip()); }
+    explicit WarpedLfo (uint32_t seed = 1) : baseSeed (seed ? seed : 1u), rng (baseSeed) { regenerateGlitch(); wanderA.store (rng.bip()); wanderB.store (rng.bip()); }
+
+    void reseed (uint32_t seed) noexcept
+    {
+        baseSeed = seed ? seed : 1u;
+        rng.seed (baseSeed);
+        reset();
+    }
 
     void reset()
     {
+        rng.seed (baseSeed);
         phase = 0.0; fadePos = 0.0f; done = false; smoothed = 0.0f; smoothPrimed = false;
         held.store (rng.bip()); wanderA.store (rng.bip()); wanderB.store (rng.bip()); regenerateGlitch();
     }
@@ -180,6 +188,7 @@ private:
         }
     }
 
+    uint32_t baseSeed = 1u;
     Rng rng;
     double phase = 0.0, bpm = 120.0;
     float out = 0.0f, shownPhase = 0.0f, fadePos = 0.0f, smoothed = 0.0f;

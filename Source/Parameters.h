@@ -397,7 +397,15 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (mac8_dest5,    "Macro 8 Dest E", Choice, 0, 1, 0, 0, 1, None, "@dest") \
     F (mac8_amt5,     "Macro 8 Amt E",  Float,  -1, 1, 0, 0, 0, Bip, "") \
     F (mac8_dest6,    "Macro 8 Dest F", Choice, 0, 1, 0, 0, 1, None, "@dest") \
-    F (mac8_amt6,     "Macro 8 Amt F",  Float,  -1, 1, 0, 0, 0, Bip, "")
+    F (mac8_amt6,     "Macro 8 Amt F",  Float,  -1, 1, 0, 0, 0, Bip, "") \
+    /* ── V2 Dark Analog Organic Layer & Procedural Texture Bus (append-only, 0% default) ── */ \
+    F (v2_organic_amt,   "Organic Drift",  Float,  0, 1, 0.0f,  0, 0, Pct, "") \
+    F (v2_organic_floor, "Thermal Floor",  Float,  0, 1, 0.0f,  0, 0, Pct, "") \
+    F (v2_organic_mono,  "Sub-120 Anchor", Bool,   0, 1, 0,     0, 0, None, "") \
+    F (v2_tex_mode,      "Texture Mode",   Choice, 0, 2, 0,     0, 1, None, "Tape Air|Sub Weight|Metal Exciter") \
+    F (v2_tex_mix,       "Texture Mix",    Float,  0, 1, 0.0f,  0, 0, Pct, "") \
+    F (v2_tex_tone,      "Texture Tone",   Float,  0, 1, 0.5f,  0, 0, Pct, "") \
+    F (v2_tex_drive,     "Texture Drive",  Float,  0, 1, 0.35f, 0, 0, Pct, "")
 
 enum PID : int
 {
@@ -454,6 +462,7 @@ static_assert (exprAmtPid (2, 1) == at_amt2 && exprDestPid (0, 1) == vel_dest2, 
 inline bool isResonatorParam (int pid) noexcept { return pid >= res_on && pid <= res_mix; }
 inline bool isFmParam (int pid) noexcept        { return pid >= fm_on && pid <= fm_key; }
 inline bool isMacroParam (int pid) noexcept     { return pid >= macro1 && pid <= mac8_amt6; }
+inline bool isV2DspParam (int pid) noexcept     { return pid >= v2_organic_amt && pid <= v2_tex_drive; }
 
 /** Macros: eight knobs, six routes each. A macro's offset on a destination is amount × knob (normalised), summed
     with the LFOs and expression, so a macro at 0 leaves the preset exactly as written. */
