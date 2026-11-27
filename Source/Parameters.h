@@ -405,7 +405,30 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (v2_tex_mode,      "Texture Mode",   Choice, 0, 2, 0,     0, 1, None, "Tape Air|Sub Weight|Metal Exciter") \
     F (v2_tex_mix,       "Texture Mix",    Float,  0, 1, 0.0f,  0, 0, Pct, "") \
     F (v2_tex_tone,      "Texture Tone",   Float,  0, 1, 0.5f,  0, 0, Pct, "") \
-    F (v2_tex_drive,     "Texture Drive",  Float,  0, 1, 0.35f, 0, 0, Pct, "")
+    F (v2_tex_drive,     "Texture Drive",  Float,  0, 1, 0.35f, 0, 0, Pct, "") \
+    /* ── V2 Control Plane: XY Sculptor, MPE, Velocity Curve, Slide & Breath (append-only, legacy-preserving defaults) ── */ \
+    F (v2_xy_x,          "XY X",           Float,  0, 1, 0.5f,  0, 0, Pct, "") \
+    F (v2_xy_y,          "XY Y",           Float,  0, 1, 0.5f,  0, 0, Pct, "") \
+    F (v2_xy_x_dest1,    "XY X Dest A",    Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_xy_x_amt1,     "XY X Amt A",     Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_xy_x_dest2,    "XY X Dest B",    Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_xy_x_amt2,     "XY X Amt B",     Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_xy_y_dest1,    "XY Y Dest A",    Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_xy_y_amt1,     "XY Y Amt A",     Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_xy_y_dest2,    "XY Y Dest B",    Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_xy_y_amt2,     "XY Y Amt B",     Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_mpe_on,        "MPE Mode",       Bool,   0, 1, 0,     0, 0, None, "") \
+    F (v2_mpe_bend,      "MPE Bend Range", Float,  1, 48, 48,   0, 1, St, "") \
+    F (v2_pb_range,      "Pitch Bend Range", Float, 1, 48, 2,   0, 1, St, "") \
+    F (v2_vel_curve,     "Velocity Curve", Choice, 0, 4, 0,     0, 1, None, "Linear|Soft|Hard|S-Curve|Fixed") \
+    F (v2_slide_dest1,   "Slide Dest A",   Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_slide_amt1,    "Slide Amt A",    Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_slide_dest2,   "Slide Dest B",   Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_slide_amt2,    "Slide Amt B",    Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_breath_dest1,  "Breath Dest A",  Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_breath_amt1,   "Breath Amt A",   Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_breath_dest2,  "Breath Dest B",  Choice, 0, 1, 0,     0, 1, None, "@dest") \
+    F (v2_breath_amt2,   "Breath Amt B",   Float, -1, 1, 0.0f,  0, 0, Bip, "")
 
 enum PID : int
 {
@@ -463,6 +486,24 @@ inline bool isResonatorParam (int pid) noexcept { return pid >= res_on && pid <=
 inline bool isFmParam (int pid) noexcept        { return pid >= fm_on && pid <= fm_key; }
 inline bool isMacroParam (int pid) noexcept     { return pid >= macro1 && pid <= mac8_amt6; }
 inline bool isV2DspParam (int pid) noexcept     { return pid >= v2_organic_amt && pid <= v2_tex_drive; }
+inline bool isV2ControlParam (int pid) noexcept { return pid >= v2_xy_x && pid <= v2_breath_amt2; }
+
+/** Hero Macros (first 4 of the 8 performance macros, NAMM performance dock workhorses). */
+constexpr int kHeroMacros = 4;
+constexpr int kXySlots = 2;
+constexpr int xyDestPid (int axis, int slot) noexcept { return (axis == 0 ? v2_xy_x_dest1 : v2_xy_y_dest1) + slot * 2; }
+constexpr int xyAmtPid  (int axis, int slot) noexcept { return xyDestPid (axis, slot) + 1; }
+static_assert (xyAmtPid (1, 1) == v2_xy_y_amt2 && xyDestPid (0, 1) == v2_xy_x_dest2, "XY parameter layout");
+
+/** Extended V2 expression slots: Slide (CC74) and Breath (CC2), 2 destinations each. */
+constexpr int slideDestPid  (int slot) noexcept { return v2_slide_dest1 + slot * 2; }
+constexpr int slideAmtPid   (int slot) noexcept { return slideDestPid (slot) + 1; }
+constexpr int breathDestPid (int slot) noexcept { return v2_breath_dest1 + slot * 2; }
+constexpr int breathAmtPid  (int slot) noexcept { return breathDestPid (slot) + 1; }
+static_assert (slideAmtPid (1) == v2_slide_amt2 && breathAmtPid (1) == v2_breath_amt2, "V2 expression layout");
+
+/** Look up a PID by string ID, or -1 if unknown. */
+int pidForId (const juce::String& id) noexcept;
 
 /** Macros: eight knobs, six routes each. A macro's offset on a destination is amount × knob (normalised), summed
     with the LFOs and expression, so a macro at 0 leaves the preset exactly as written. */

@@ -14,6 +14,21 @@ double divisionBeats (int idx)
     static constexpr double beats[] { 16, 8, 4, 2, 1, 0.5, 0.25, 0.125, 2.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0, 1.5, 0.75 };
     return beats[juce::jlimit (0, 12, idx)];
 }
+
+/** Selectable velocity curve shaping (0=Linear, 1=Soft, 2=Hard, 3=S-Curve, 4=Fixed). */
+float shapeVelocity (float v, int curve) noexcept
+{
+    v = std::clamp (v, 0.0f, 1.0f);
+    switch (curve)
+    {
+        case 1: return std::pow (v, 0.6f);               // Soft
+        case 2: return std::pow (v, 1.8f);               // Hard
+        case 3: return v * v * (3.0f - 2.0f * v);        // S-Curve
+        case 4: return 0.85f;                            // Fixed
+        case 0:
+        default: return v;
+    }
+}
 } // namespace
 
 //==============================================================================
@@ -21,7 +36,7 @@ VesselProcessor::VesselProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "VESSEL", createLayout())
+      apvts (*this, &undoManager, "VESSEL", createLayout())
 {
     // Build the shared wavetable bank here, on the message thread. (It used to be built lazily by the first
     // voice that sounded, i.e. on the audio thread: ~720 kB of allocation and 88 inverse FFTs mid-callback.)
@@ -36,12 +51,21 @@ VesselProcessor::VesselProcessor()
         paramRanges[(size_t) i] = params[(size_t) i]->getNormalisableRange();
         smoothed[(size_t) i] = spec (i).type == PType::Float && spec (i).step <= 0.0f;
         lastRawBits[(size_t) i] = 0xFFFFFFFFu;
+        ccTargetNorm[(size_t) i] = 0.0f;
+        ccTargetActive[(size_t) i] = false;
+        ccSyncNorm[(size_t) i].store (0.0f, std::memory_order_relaxed);
+        ccSyncDirty[(size_t) i].store (false, std::memory_order_relaxed);
         if (spec (i).type == PType::Float) floatPids.push_back (i);
     }
 
     resetDrawTables();
     PresetBank::factory();   // parse the factory bank on the message thread
+    abSlots[0] = captureSnapshot();
+    abSlots[1] = abSlots[0];
+    undoManager.clearUndoHistory();
 #if ! VESSEL_HEADLESS
+    midiLearn.loadFromDisk();
+    presetManager.refresh();
     startTimerHz (8);
 #endif
 }
@@ -104,7 +128,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     convMixS.prepare (fs, 30.0f); convMixS.snap (0.0f);
     inLevelR.reset(); sendR.reset(); cleanR.reset();
     resMonoNote = -1;
-    mwRaw = atRaw = velRaw = mwS = atS = velS = bendRaw = bendS = 0.0f;
+    resetExpressionState();
     scopeDecim = 0.0f; peakHoldL = peakHoldR = 0.0f;
     samplePos = 0; ctrlRem = 0; busRem = 0; bodyQuietSamples = 0; voiceOsIdle = true; busVoiceActive = false; busLowestHeld = -1; midiDirty = false;
     for (auto* f : { &fGran, &fUnmask, &fCrush, &fVhs, &fFollow, &fFormant, &fOtt, &fMono, &fRes }) f->prepare (fs);
@@ -147,6 +171,18 @@ void VesselProcessor::setQaDeterministicSeed (uint32_t seed) noexcept
     voiceOsIdle = true;
     busVoiceActive = false;
     busLowestHeld = -1;
+    resetExpressionState();
+}
+
+void VesselProcessor::resetExpressionState() noexcept
+{
+    mwRaw = atRaw = velRaw = mwS = atS = velS = 0.0f;
+    bendNormRaw = bendNormS = 0.0f;
+    breathRaw = breathS = slideRaw = slideS = activeMaxPressS = 0.0f;
+    sustainHeld = false;
+    polyPressSeen = false;
+    for (auto& c : mpeCh) c = MpeChannelState {};
+    for (auto& ve : voiceExpr) ve = VoiceExprState {};
 }
 
 /** Fresh start (prepare, state load): smoothers and bypass fades jump to the current values. */
@@ -158,6 +194,7 @@ void VesselProcessor::snapToCurrentState()
         const float raw = rawParams[(size_t) i]->load (std::memory_order_relaxed);
         lastRawBits[(size_t) i] = std::bit_cast<uint32_t> (raw);
         targetNorm[(size_t) i] = base[(size_t) i] = busBase[(size_t) i] = paramRanges[(size_t) i].convertTo0to1 (raw);
+        ccTargetActive[(size_t) i] = false;
     }
     busMod.fill (0.0f);
     baseReady = true;
@@ -191,40 +228,165 @@ void VesselProcessor::handleMidi (const juce::MidiMessage& m)
         if (back >= 0 && back != resMonoNote) { resonator.monoNote (back, velRaw, vm == 1); resMonoNote = back; }
     };
 
+    const int ch = juce::jlimit (1, 16, m.getChannel());
+    const bool mpeOn = pb (v2_mpe_on);
+    const bool isMpeMember = mpeOn && (ch != mpeMasterChannel);
+
     if (m.isNoteOn())
     {
         const bool fromSilence = ! voices.anyHeld();
         const int note = m.getNoteNumber();
-        velRaw = m.getFloatVelocity();
-        voices.noteOn (note, velRaw);
-        textureBus.noteOn (note, velRaw);
+        const float shapedVel = shapeVelocity (m.getFloatVelocity(), pc (v2_vel_curve));
+        velRaw = shapedVel;
+
+        for (int v = 0; v < VoiceManager::kVoices; ++v)
+            if (! voices.voiceActive (v)) { voiceExpr[(size_t) v].gateHeld = false; voiceExpr[(size_t) v].note = -1; }
+
+        int targetIdx = 0;
+        if (vm == 0)
+        {
+            targetIdx = -1;
+            for (int v = 0; v < VoiceManager::kVoices; ++v)
+                if (voices.voiceActive (v) && voiceExpr[(size_t) v].note == note) { targetIdx = v; break; }
+            if (targetIdx < 0)
+                for (int v = 0; v < VoiceManager::kVoices; ++v)
+                    if (! voices.voiceActive (v)) { targetIdx = v; break; }
+            if (targetIdx < 0)
+            {
+                uint32_t best = 0;
+                for (int v = 0; v < VoiceManager::kVoices; ++v)
+                {
+                    const uint32_t score = voiceExpr[(size_t) v].age + (voiceExpr[(size_t) v].gateHeld ? 0u : 100000000u);
+                    if (targetIdx < 0 || score > best) { targetIdx = v; best = score; }
+                }
+            }
+        }
+
+        voices.noteOn (note, shapedVel);
+
+        if (targetIdx >= 0 && targetIdx < VoiceManager::kVoices)
+        {
+            auto& ve = voiceExpr[(size_t) targetIdx];
+            ve.note = note;
+            ve.channel = ch;
+            ve.gateHeld = true;
+            ve.latched = false;
+            ve.age = 0;
+            ve.polyPressRaw = 0.0f;
+            ve.polyPressS = 0.0f;
+            if (isMpeMember)
+            {
+                auto& mc = mpeCh[(size_t) ch];
+                mc.bendS = mc.bendRaw;
+                mc.slideS = mc.slideRaw;
+                mc.pressS = mc.pressRaw;
+            }
+        }
+
+        textureBus.noteOn (note, shapedVel);
         midiDirty = true;
         if (fromSilence) tape.noteOnFromSilence (tp);
         if (pb (duck_on)) ducker.trigger();
         for (int l = 0; l < kNumLfos; ++l) lfos[(size_t) l].trigger (pc (lfoExt (l)), fromSilence);
-        if (vm == 0) resonator.noteOn (note, velRaw);
-        else { resonator.monoNote (note, velRaw, vm == 1 || fromSilence); resMonoNote = note; }
+        if (vm == 0) resonator.noteOn (note, shapedVel);
+        else { resonator.monoNote (note, shapedVel, vm == 1 || fromSilence); resMonoNote = note; }
     }
     else if (m.isNoteOff())
     {
-        voices.noteOff (m.getNoteNumber());
+        const int note = m.getNoteNumber();
+        if (! sustainHeld)
+        {
+            for (int v = 0; v < VoiceManager::kVoices; ++v)
+            {
+                auto& ve = voiceExpr[(size_t) v];
+                if (ve.gateHeld && ve.note == note && (! isMpeMember || ve.channel == ch))
+                {
+                    const auto& mc = mpeCh[(size_t) juce::jlimit (1, 16, ve.channel)];
+                    ve.latchedBend = mc.bendS;
+                    ve.latchedSlide = mc.slideS;
+                    ve.latchedPress = mc.pressS;
+                    ve.latched = true;
+                    ve.gateHeld = false;
+                }
+            }
+        }
+        voices.noteOff (note);
         if (! voices.anyHeld()) tape.allReleased (tp);
-        if (vm == 0) resonator.noteOff (m.getNoteNumber());
+        if (vm == 0) resonator.noteOff (note);
         else resFollowMono();
     }
-    else if (m.isSustainPedalOn())  { voices.setSustain (true); resonator.setSustain (true); }
+    else if (m.isSustainPedalOn())  { sustainHeld = true; voices.setSustain (true); resonator.setSustain (true); }
     else if (m.isSustainPedalOff())
     {
+        sustainHeld = false;
         voices.setSustain (false); resonator.setSustain (false);
-        if (! voices.anyHeld()) tape.allReleased (tp);
+        if (! voices.anyHeld())
+        {
+            for (auto& ve : voiceExpr)
+                if (ve.gateHeld)
+                {
+                    const auto& mc = mpeCh[(size_t) juce::jlimit (1, 16, ve.channel)];
+                    ve.latchedBend = mc.bendS; ve.latchedSlide = mc.slideS; ve.latchedPress = mc.pressS;
+                    ve.latched = true; ve.gateHeld = false;
+                }
+            tape.allReleased (tp);
+        }
         if (vm != 0) resFollowMono();
     }
-    else if (m.isAllNotesOff() || m.isAllSoundOff()) { voices.allOff(); tape.allReleased (tp); resonator.allOff(); resMonoNote = -1; }
-    else if (m.isPitchWheel()) bendRaw = ((float) m.getPitchWheelValue() - 8192.0f) / 8192.0f * 2.0f;
-    else if (m.isControllerOfType (1)) mwRaw = (float) m.getControllerValue() / 127.0f;
-    else if (m.isChannelPressure()) atRaw = (float) m.getChannelPressureValue() / 127.0f;
-    else if (m.isAftertouch()) atRaw = (float) m.getAfterTouchValue() / 127.0f;   // poly pressure drives the same bus
-    else if (m.isResetAllControllers()) { mwRaw = atRaw = bendRaw = 0.0f; }
+    else if (m.isAllNotesOff() || m.isAllSoundOff())
+    {
+        sustainHeld = false;
+        voices.allOff();
+        for (auto& ve : voiceExpr) ve = VoiceExprState {};
+        tape.allReleased (tp);
+        resonator.allOff();
+        resMonoNote = -1;
+    }
+    else if (m.isPitchWheel())
+    {
+        const float norm = juce::jlimit (-1.0f, 1.0f, ((float) m.getPitchWheelValue() - 8192.0f) / 8192.0f);
+        if (isMpeMember) mpeCh[(size_t) ch].bendRaw = norm;
+        else bendNormRaw = norm;
+    }
+    else if (m.isController())
+    {
+        const int cc = m.getControllerNumber();
+        const float val = (float) m.getControllerValue() / 127.0f;
+        const int learnedPid = midiLearn.processCCAudio (cc);
+        if (learnedPid >= 0 && learnedPid < NUM_PARAMS)
+        {
+            ccTargetNorm[(size_t) learnedPid] = val;
+            ccTargetActive[(size_t) learnedPid] = true;
+            ccSyncNorm[(size_t) learnedPid].store (val, std::memory_order_relaxed);
+            ccSyncDirty[(size_t) learnedPid].store (true, std::memory_order_release);
+            ccAnySyncDirty.store (true, std::memory_order_release);
+            midiDirty = true;
+        }
+        else if (cc == 1) mwRaw = val;
+        else if (cc == 2) breathRaw = val;
+        else if (cc == 74)
+        {
+            if (isMpeMember) mpeCh[(size_t) ch].slideRaw = val;
+            slideRaw = val;
+        }
+    }
+    else if (m.isChannelPressure())
+    {
+        const float val = (float) m.getChannelPressureValue() / 127.0f;
+        if (isMpeMember) mpeCh[(size_t) ch].pressRaw = val;
+        else atRaw = val;
+    }
+    else if (m.isAftertouch())
+    {
+        const int note = m.getNoteNumber();
+        const float val = (float) m.getAfterTouchValue() / 127.0f;
+        polyPressSeen = true;
+        bool matched = false;
+        for (int v = 0; v < VoiceManager::kVoices; ++v)
+            if (voices.voiceActive (v) && voiceExpr[(size_t) v].note == note) { voiceExpr[(size_t) v].polyPressRaw = val; matched = true; }
+        if (! matched) atRaw = val;
+    }
+    else if (m.isResetAllControllers()) { resetExpressionState(); }
 }
 
 void VesselProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -297,7 +459,10 @@ void VesselProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     telemetry.followerEnv = follower.lastEnv();
     telemetry.tapeSpeed = tape.speedForDisplay();
     telemetry.grainLooping = granular.isLooping();
-    telemetry.modWheel = mwS; telemetry.aftertouch = atS; telemetry.velocity = velS;
+    telemetry.modWheel = mwS; telemetry.aftertouch = std::max (atS, activeMaxPressS); telemetry.velocity = velS;
+    telemetry.breath = breathS; telemetry.slide = slideS;
+    telemetry.xyX = pv (v2_xy_x); telemetry.xyY = pv (v2_xy_y);
+    telemetry.mpeActive = pb (v2_mpe_on);
     const auto og = ott.bandGainDb();
     for (int b = 0; b < 3; ++b) telemetry.ottGain[b] = og[(size_t) b];
     for (int i = 0; i < NUM_PARAMS; ++i) telemetry.modOffset[(size_t) i].store (mod[(size_t) i], std::memory_order_relaxed);
@@ -318,6 +483,11 @@ void VesselProcessor::smoothControls (int n)
         {
             lastRawBits[(size_t) i] = bits;
             targetNorm[(size_t) i] = paramRanges[(size_t) i].convertTo0to1 (raw);
+            ccTargetActive[(size_t) i] = false;
+        }
+        else if (ccTargetActive[(size_t) i])
+        {
+            targetNorm[(size_t) i] = ccTargetNorm[(size_t) i];
         }
         const float target = targetNorm[(size_t) i];
         auto& b = base[(size_t) i];
@@ -325,10 +495,43 @@ void VesselProcessor::smoothControls (int n)
     }
 
     const float e = std::exp (-(float) n / (0.012f * (float) sr));   // expression: 12 ms (aftertouch is often 7-bit)
-    mwS  = mwRaw  + e * (mwS  - mwRaw);
-    atS  = atRaw  + e * (atS  - atRaw);
-    velS = velRaw + e * (velS - velRaw);
-    bendS = bendRaw + e * (bendS - bendRaw);
+    mwS       = mwRaw       + e * (mwS       - mwRaw);
+    atS       = atRaw       + e * (atS       - atRaw);
+    velS      = velRaw      + e * (velS      - velRaw);
+    bendNormS = bendNormRaw + e * (bendNormS - bendNormRaw);
+    breathS   = breathRaw   + e * (breathS   - breathRaw);
+    slideS    = slideRaw    + e * (slideS    - slideRaw);
+
+    const bool mpeOn = pb (v2_mpe_on);
+    float maxPress = atS;
+    if (mpeOn)
+    {
+        for (int ch = 1; ch <= 16; ++ch)
+        {
+            auto& mc = mpeCh[(size_t) ch];
+            mc.bendS  = mc.bendRaw  + e * (mc.bendS  - mc.bendRaw);
+            mc.slideS = mc.slideRaw + e * (mc.slideS - mc.slideRaw);
+            mc.pressS = mc.pressRaw + e * (mc.pressS - mc.pressRaw);
+        }
+    }
+    if (polyPressSeen || mpeOn)
+    {
+        for (int v = 0; v < VoiceManager::kVoices; ++v)
+        {
+            auto& ve = voiceExpr[(size_t) v];
+            if (polyPressSeen) ve.polyPressS = ve.polyPressRaw + e * (ve.polyPressS - ve.polyPressRaw);
+            if (voices.voiceActive (v))
+            {
+                maxPress = std::max (maxPress, ve.polyPressS);
+                if (mpeOn)
+                {
+                    const float mp = ve.latched ? ve.latchedPress : mpeCh[(size_t) juce::jlimit (1, 16, ve.channel)].pressS;
+                    maxPress = std::max (maxPress, mp);
+                }
+            }
+        }
+    }
+    activeMaxPressS = maxPress;
 }
 
 namespace
@@ -392,14 +595,31 @@ void VesselProcessor::applyExpression()
         const float amt = pv (kExprDest[s] + 1);
         if (s < 2)
         {
-            if (! isVoiceParam (dest)) mod[(size_t) dest] += amt * velS;   // per-voice velocity handled in buildVoiceParams
+            if (! isVoiceParam (dest)) mod[(size_t) dest] += amt * velS;
         }
-        else mod[(size_t) dest] += amt * (s < 4 ? mwS : atS);
+        else if (s < 4) mod[(size_t) dest] += amt * mwS;
+        else if (! isVoiceParam (dest)) mod[(size_t) dest] += amt * std::max (atS, activeMaxPressS);
+    }
+    if (slideS > 1.0e-5f)
+    {
+        for (int s = 0; s < 2; ++s)
+        {
+            const int dest = destIndexToPid (pc (slideDestPid (s)));
+            if (dest >= 0 && ! isVoiceParam (dest)) mod[(size_t) dest] += pv (slideAmtPid (s)) * slideS;
+        }
+    }
+    if (breathS > 1.0e-5f)
+    {
+        for (int s = 0; s < 2; ++s)
+        {
+            const int dest = destIndexToPid (pc (breathDestPid (s)));
+            if (dest >= 0) mod[(size_t) dest] += pv (breathAmtPid (s)) * breathS;
+        }
     }
 }
 
-/** The eight macros: amount × knob on each routed destination. Applied after expression (so nothing here depends
-    on it) and before the LFOs, so a macro can also set an LFO's rate or warp. */
+/** The eight macros (first 4 are Hero Performance Macros): amount × knob on each routed destination. Applied after
+    expression and before XY & LFOs, so a macro can drive V1 targets, V2 organic/texture/FX, and LFO rate/warp. */
 void VesselProcessor::applyMacros()
 {
     for (int m = 0; m < kNumMacros; ++m)
@@ -414,10 +634,30 @@ void VesselProcessor::applyMacros()
     }
 }
 
+void VesselProcessor::applyXy()
+{
+    const float dx = (pv (v2_xy_x) - 0.5f) * 2.0f;
+    const float dy = (pv (v2_xy_y) - 0.5f) * 2.0f;
+    if (std::abs (dx) > 1.0e-5f)
+        for (int s = 0; s < kXySlots; ++s)
+            if (const int dest = destIndexToPid (pc (xyDestPid (0, s))); dest >= 0)
+                mod[(size_t) dest] += pv (xyAmtPid (0, s)) * dx;
+    if (std::abs (dy) > 1.0e-5f)
+        for (int s = 0; s < kXySlots; ++s)
+            if (const int dest = destIndexToPid (pc (xyDestPid (1, s))); dest >= 0)
+                mod[(size_t) dest] += pv (xyAmtPid (1, s)) * dy;
+}
+
 juce::String VesselProcessor::macroName (int m) const
 {
     const juce::ScopedLock sl (macroNameLock);
     return juce::isPositiveAndBelow (m, kNumMacros) ? macroNames[(size_t) m] : juce::String();
+}
+
+juce::String VesselProcessor::heroMacroLabel (int m) const
+{
+    const auto n = macroName (m);
+    return n.isNotEmpty() ? n : ("MACRO " + juce::String (m + 1));
 }
 
 void VesselProcessor::setMacroName (int m, const juce::String& n)
@@ -429,6 +669,32 @@ void VesselProcessor::setMacroName (int m, const juce::String& n)
     }
     ++macroNamesVersion;
 }
+
+juce::String VesselProcessor::xyLabelX() const { const juce::ScopedLock sl (macroNameLock); return xyNameX.isNotEmpty() ? xyNameX : juce::String ("TIMBRE"); }
+juce::String VesselProcessor::xyLabelY() const { const juce::ScopedLock sl (macroNameLock); return xyNameY.isNotEmpty() ? xyNameY : juce::String ("SPACE"); }
+
+void VesselProcessor::setXyLabels (const juce::String& xLabel, const juce::String& yLabel)
+{
+    {
+        const juce::ScopedLock sl (macroNameLock);
+        xyNameX = xLabel.trim().substring (0, 20);
+        xyNameY = yLabel.trim().substring (0, 20);
+    }
+    ++macroNamesVersion;
+}
+
+void VesselProcessor::setXyPosition (float x01, float y01)
+{
+    if (auto* px = param (v2_xy_x)) px->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, x01));
+    if (auto* py = param (v2_xy_y)) py->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, y01));
+}
+
+juce::String VesselProcessor::currentPresetName() const        { const juce::ScopedLock sl (macroNameLock); return metaName; }
+juce::String VesselProcessor::currentPresetAuthor() const      { const juce::ScopedLock sl (macroNameLock); return metaAuthor; }
+juce::String VesselProcessor::currentPresetCategory() const    { const juce::ScopedLock sl (macroNameLock); return metaCategory; }
+juce::String VesselProcessor::currentPresetTags() const        { const juce::ScopedLock sl (macroNameLock); return metaTags; }
+juce::String VesselProcessor::currentPresetDescription() const { const juce::ScopedLock sl (macroNameLock); return metaDescription; }
+bool VesselProcessor::currentPresetFavorite() const            { const juce::ScopedLock sl (macroNameLock); return metaFavorite; }
 
 void VesselProcessor::buildVoiceParams()
 {
@@ -455,16 +721,25 @@ void VesselProcessor::buildVoiceParams()
     vp.fmRatio = kFmRatios[(size_t) juce::jlimit (0, (int) std::size (kFmRatios) - 1, pc (fm_ratio))];
     vp.fmFine = pv (fm_fine); vp.fmIndex = pv (fm_index); vp.fmFb = pv (fm_feedback);
     vp.fmEnv = pv (fm_env); vp.fmDecay = pv (fm_decay); vp.fmKey = pv (fm_key);
-    vp.bend = bendS;
+
+    const bool mpeOn = pb (v2_mpe_on);
+    const float globalBendSt = bendNormS * pv (v2_pb_range);
+    const float mpeBendRange = pv (v2_mpe_bend);
+    vp.bend = globalBendSt;
     vp.velAmp = pv (vel_amp);
     vp.organicAmt = pv (v2_organic_amt);
 
-    int vDest[2] { -1, -1 };
-    float vAmt[2] { 0.0f, 0.0f };
+    struct VoiceRoute { int dest = -1; float amt = 0.0f; int srcKind = 0; };
+    VoiceRoute routes[6];
+    int numRoutes = 0;
     for (int s = 0; s < 2; ++s)
     {
-        const int d = destIndexToPid (pc (s == 0 ? vel_dest1 : vel_dest2));
-        if (d >= 0 && isVoiceParam (d)) { vDest[s] = d; vAmt[s] = pv (s == 0 ? vel_amt1 : vel_amt2); }
+        if (const int dVel = destIndexToPid (pc (s == 0 ? vel_dest1 : vel_dest2)); dVel >= 0 && isVoiceParam (dVel))
+            routes[numRoutes++] = { dVel, pv (s == 0 ? vel_amt1 : vel_amt2), 0 };
+        if (const int dAt = destIndexToPid (pc (s == 0 ? at_dest1 : at_dest2)); dAt >= 0 && isVoiceParam (dAt))
+            routes[numRoutes++] = { dAt, pv (s == 0 ? at_amt1 : at_amt2), 1 };
+        if (const int dSl = destIndexToPid (pc (slideDestPid (s))); dSl >= 0 && isVoiceParam (dSl))
+            routes[numRoutes++] = { dSl, pv (slideAmtPid (s)), 2 };
     }
 
     for (int v = 0; v < VoiceManager::kVoices; ++v)
@@ -472,15 +747,41 @@ void VesselProcessor::buildVoiceParams()
         auto& p = voiceParams[(size_t) v];
         p = vp;
         if (! voices.voiceActive (v)) continue;
-        const float vel = voices.voiceVelocity (v);
-        for (int s = 0; s < 2; ++s)
+
+        const auto& ve = voiceExpr[(size_t) v];
+        const int vCh = juce::jlimit (1, 16, ve.channel);
+        const bool memberVoice = mpeOn && (vCh != mpeMasterChannel);
+
+        float voiceBendSt = globalBendSt;
+        float voicePress = std::max (atS, ve.polyPressS);
+        float voiceSlide = slideS;
+        if (memberVoice)
         {
-            if (vDest[s] < 0) continue;
-            float extra = vAmt[s] * vel;
-            if (vDest[0] == vDest[1] && s == 1) continue;                    // same target twice: sum once
-            if (vDest[0] == vDest[1]) extra = (vAmt[0] + vAmt[1]) * vel;
-            setVoiceField (p, vDest[s], pvExtra (vDest[s], extra), tuneCoarse);
+            const float bNorm = ve.latched ? ve.latchedBend  : mpeCh[(size_t) vCh].bendS;
+            const float pNorm = ve.latched ? ve.latchedPress : mpeCh[(size_t) vCh].pressS;
+            const float sNorm = ve.latched ? ve.latchedSlide : mpeCh[(size_t) vCh].slideS;
+            voiceBendSt += bNorm * mpeBendRange;
+            voicePress = std::max (voicePress, pNorm);
+            voiceSlide = sNorm;
         }
+        p.bend = voiceBendSt;
+
+        if (numRoutes == 0) continue;
+        const float vel = voices.voiceVelocity (v);
+        int uniqueDest[6] {};
+        float uniqueExtra[6] {};
+        int nUnique = 0;
+        for (int r = 0; r < numRoutes; ++r)
+        {
+            const float srcVal = routes[r].srcKind == 0 ? vel : (routes[r].srcKind == 1 ? voicePress : voiceSlide);
+            const float delta = routes[r].amt * srcVal;
+            int slot = -1;
+            for (int u = 0; u < nUnique; ++u) if (uniqueDest[u] == routes[r].dest) { slot = u; break; }
+            if (slot < 0) { uniqueDest[nUnique] = routes[r].dest; uniqueExtra[nUnique] = delta; ++nUnique; }
+            else uniqueExtra[slot] += delta;
+        }
+        for (int u = 0; u < nUnique; ++u)
+            setVoiceField (p, uniqueDest[u], pvExtra (uniqueDest[u], uniqueExtra[u]), tuneCoarse);
     }
 }
 
@@ -539,6 +840,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
             std::fill (mod.begin(), mod.end(), 0.0f);
             applyExpression();
             applyMacros();
+            applyXy();
             for (int l = 0; l < kNumLfos; ++l)
             {
                 const int b0 = lfoBase (l), e0 = lfoExt (l);
@@ -584,6 +886,12 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
                 const int osLen = subLen * VoiceManager::kOs;
                 voices.renderSlice (upBodyL + osOff, upBodyR + osOff, upSub + osOff, osLen,
                                     voiceParams, pb (flt_on), pc (flt_route), isCtrlTick, kControlStep * VoiceManager::kOs);
+                const uint32_t baseSamples = (uint32_t) std::max (1, subLen);
+                for (int v = 0; v < VoiceManager::kVoices; ++v)
+                {
+                    if (voices.voiceActive (v)) voiceExpr[(size_t) v].age += baseSamples;
+                    else { voiceExpr[(size_t) v].gateHeld = false; voiceExpr[(size_t) v].note = -1; }
+                }
             }
             else
             {
@@ -705,7 +1013,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         rsp.model = pc (res_model); rsp.tune = pvBus (res_tune); rsp.decay = pvBus (res_decay); rsp.bright = pvBus (res_bright);
         rsp.stiff = pvBus (res_stiff); rsp.pos = pvBus (res_pos); rsp.damper = pvBus (res_damper); rsp.input = pvBus (res_input);
         rsp.strike = pvBus (res_strike); rsp.mix = pvBus (res_mix);
-        rsp.bend = bendS; rsp.glideMs = pc (voice_mode) != 0 ? pvBus (glide) : 0.0f;
+        rsp.bend = bendNormS * pvBus (v2_pb_range); rsp.glideMs = pc (voice_mode) != 0 ? pvBus (glide) : 0.0f;
         faded (fRes, pb (res_on), n, [&] (bool on) { rsp.on = on; resonator.process (xL.data(), xR.data(), n, rsp); });
     }
 
@@ -855,6 +1163,15 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
 //==============================================================================
 void VesselProcessor::timerCallback()
 {
+    if (ccAnySyncDirty.exchange (false, std::memory_order_acq_rel))
+    {
+        for (int i = 0; i < NUM_PARAMS; ++i)
+            if (ccSyncDirty[(size_t) i].exchange (false, std::memory_order_acq_rel))
+                params[(size_t) i]->setValueNotifyingHost (ccSyncNorm[(size_t) i].load (std::memory_order_relaxed));
+    }
+    if (midiLearn.consumeDirtyForSave())
+        midiLearn.saveToDisk();
+
     // a table picked while the host is not processing still loads (the audio thread asks as well, at once)
     if (const int t = pc (wt_table); t != tables.currentIndex()) tables.request (t);
     refreshImpulseResponse (false);
@@ -973,24 +1290,137 @@ void VesselProcessor::resetDrawTables()
     there (20 ms), so switching presets while notes ring does not click. */
 void VesselProcessor::applyPreset (const FactoryPreset& p)
 {
+    beginUndoTransaction ("Load Preset: " + p.name);
     for (int i = 0; i < NUM_PARAMS; ++i)
         params[(size_t) i]->setValueNotifyingHost (params[(size_t) i]->getDefaultValue());
     for (auto [pid, v] : p.values)
-        params[(size_t) pid]->setValueNotifyingHost (params[(size_t) pid]->convertTo0to1 (v));
+        if (pid >= 0 && pid < NUM_PARAMS)
+            params[(size_t) pid]->setValueNotifyingHost (params[(size_t) pid]->convertTo0to1 (v));
     resetDrawTables();
     {
         const juce::ScopedLock sl (irLock);
         userIrFile = juce::File();
         userIrDirty = false;
     }
-    for (int m = 0; m < kNumMacros; ++m) setMacroName (m, p.macroNames[m]);
+    for (int m = 0; m < kNumMacros; ++m) setMacroName (m, m < p.macroNames.size() ? p.macroNames[m] : juce::String());
+    setXyLabels (p.xyLabelX, p.xyLabelY);
+    {
+        const juce::ScopedLock sl (macroNameLock);
+        metaName = p.name; metaAuthor = p.author; metaCategory = p.category;
+        metaTags = p.character; metaDescription = p.description; metaFavorite = p.favorite;
+    }
     tables.loadNow (pc (wt_table));   // decoded before the next block, so the preset's first note has its table
     refreshImpulseResponse (false);
+    flushUndoState();
+    const int slot = activeAB.load (std::memory_order_acquire);
+    abSlots[(size_t) slot] = captureSnapshot();
+    if (! abSlots[(size_t) (1 - slot)].valid) abSlots[(size_t) (1 - slot)] = abSlots[(size_t) slot];
 }
+
+FactoryPreset VesselProcessor::captureCurrentPreset (const juce::String& name, const juce::String& author,
+                                                     const juce::String& category, const juce::String& tags,
+                                                     const juce::String& description, bool favorite) const
+{
+    FactoryPreset p;
+    p.schemaVersion = 2;
+    p.name = name.trim().isNotEmpty() ? name.trim() : currentPresetName();
+    p.author = author.trim().isNotEmpty() ? author.trim() : currentPresetAuthor();
+    p.category = category.trim().isNotEmpty() ? category.trim() : currentPresetCategory();
+    p.character = tags.trim().isNotEmpty() ? tags.trim() : currentPresetTags();
+    p.description = description.trim().isNotEmpty() ? description.trim() : currentPresetDescription();
+    p.favorite = favorite;
+    p.xyLabelX = xyLabelX();
+    p.xyLabelY = xyLabelY();
+    for (int m = 0; m < kNumMacros; ++m) p.macroNames.add (macroName (m));
+    for (int i = 0; i < NUM_PARAMS; ++i)
+    {
+        const float plain = params[(size_t) i]->convertFrom0to1 (params[(size_t) i]->getValue());
+        if (std::abs (plain - spec (i).def) > 1.0e-5f)
+            p.values.emplace_back (i, plain);
+    }
+    return p;
+}
+
+VesselProcessor::ABSnapshot VesselProcessor::captureSnapshot() const
+{
+    ABSnapshot s;
+    for (int i = 0; i < NUM_PARAMS; ++i) s.normValues[(size_t) i] = params[(size_t) i]->getValue();
+    {
+        const juce::ScopedLock sl (macroNameLock);
+        s.macroNames = macroNames; s.xyX = xyNameX; s.xyY = xyNameY;
+        s.presetName = metaName; s.presetAuthor = metaAuthor; s.presetCategory = metaCategory;
+        s.presetTags = metaTags; s.presetDescription = metaDescription; s.presetFavorite = metaFavorite;
+    }
+    for (int l = 0; l < kNumLfos; ++l)
+        for (int i = 0; i < kDrawPoints; ++i)
+            s.drawTables[(size_t) l][(size_t) i] = drawTables[(size_t) l][(size_t) i].load (std::memory_order_relaxed);
+    s.valid = true;
+    return s;
+}
+
+void VesselProcessor::applySnapshotSmooth (const ABSnapshot& s)
+{
+    if (! s.valid) return;
+    for (int i = 0; i < NUM_PARAMS; ++i)
+        if (std::abs (params[(size_t) i]->getValue() - s.normValues[(size_t) i]) > 1.0e-6f)
+            params[(size_t) i]->setValueNotifyingHost (s.normValues[(size_t) i]);
+    {
+        const juce::ScopedLock sl (macroNameLock);
+        macroNames = s.macroNames; xyNameX = s.xyX; xyNameY = s.xyY;
+        metaName = s.presetName; metaAuthor = s.presetAuthor; metaCategory = s.presetCategory;
+        metaTags = s.presetTags; metaDescription = s.presetDescription; metaFavorite = s.presetFavorite;
+    }
+    for (int l = 0; l < kNumLfos; ++l)
+        for (int i = 0; i < kDrawPoints; ++i)
+            drawTables[(size_t) l][(size_t) i].store (s.drawTables[(size_t) l][(size_t) i], std::memory_order_relaxed);
+    ++macroNamesVersion;
+    tables.loadNow (pc (wt_table));
+    refreshImpulseResponse (false);
+}
+
+void VesselProcessor::setActiveABSlot (int slot)
+{
+    slot = juce::jlimit (0, 1, slot);
+    const int cur = activeAB.load (std::memory_order_acquire);
+    if (slot == cur) return;
+    abSlots[(size_t) cur] = captureSnapshot();
+    if (! abSlots[(size_t) slot].valid) abSlots[(size_t) slot] = abSlots[(size_t) cur];
+    activeAB.store (slot, std::memory_order_release);
+    beginUndoTransaction (slot == 0 ? "Switch to A" : "Switch to B");
+    applySnapshotSmooth (abSlots[(size_t) slot]);
+    flushUndoState();
+    ++abStateVersion;
+}
+
+void VesselProcessor::copyAToB()
+{
+    const int cur = activeAB.load (std::memory_order_acquire);
+    abSlots[(size_t) cur] = captureSnapshot();
+    if (! abSlots[0].valid) abSlots[0] = abSlots[(size_t) cur];
+    abSlots[1] = abSlots[0];
+    if (cur == 1) { beginUndoTransaction ("Copy A to B"); applySnapshotSmooth (abSlots[1]); flushUndoState(); }
+    ++abStateVersion;
+}
+
+void VesselProcessor::copyBToA()
+{
+    const int cur = activeAB.load (std::memory_order_acquire);
+    abSlots[(size_t) cur] = captureSnapshot();
+    if (! abSlots[1].valid) abSlots[1] = abSlots[(size_t) cur];
+    abSlots[0] = abSlots[1];
+    if (cur == 0) { beginUndoTransaction ("Copy B to A"); applySnapshotSmooth (abSlots[0]); flushUndoState(); }
+    ++abStateVersion;
+}
+
+void VesselProcessor::beginUndoTransaction (const juce::String& actionName) { (void) apvts.copyState(); undoManager.beginNewTransaction (actionName); }
+void VesselProcessor::flushUndoState() { (void) apvts.copyState(); }
+bool VesselProcessor::undo() { flushUndoState(); return undoManager.undo(); }
+bool VesselProcessor::redo() { return undoManager.redo(); }
 
 void VesselProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     auto state = apvts.copyState();
+    state.setProperty ("version", 2, nullptr);
     juce::ValueTree draw ("DRAW");
     for (int l = 0; l < kNumLfos; ++l)
     {
@@ -1006,12 +1436,26 @@ void VesselProcessor::getStateInformation (juce::MemoryBlock& dest)
     }
     state.setProperty ("preset", currentPreset.load (std::memory_order_relaxed), nullptr);
     state.setProperty ("torch", torchOn.load(), nullptr);
+    state.setProperty ("activeAB", activeAB.load (std::memory_order_acquire), nullptr);
+    {
+        const juce::ScopedLock sl (macroNameLock);
+        state.setProperty ("presetName", metaName, nullptr);
+        state.setProperty ("presetAuthor", metaAuthor, nullptr);
+        state.setProperty ("presetCategory", metaCategory, nullptr);
+        state.setProperty ("presetTags", metaTags, nullptr);
+        state.setProperty ("presetDescription", metaDescription, nullptr);
+        state.setProperty ("presetFavorite", metaFavorite, nullptr);
+        state.setProperty ("xyLabelX", xyNameX, nullptr);
+        state.setProperty ("xyLabelY", xyNameY, nullptr);
+    }
     {
         juce::ValueTree names ("MACROS");
         for (int m = 0; m < kNumMacros; ++m) names.setProperty ("m" + juce::String (m + 1), macroName (m), nullptr);
         state.removeChild (state.getChildWithName ("MACROS"), nullptr);
         state.appendChild (names, nullptr);
     }
+    state.removeChild (state.getChildWithName ("MIDILEARN"), nullptr);
+    state.appendChild (midiLearn.toValueTree(), nullptr);
 
     if (auto xml = state.createXml()) copyXmlToBinary (*xml, dest);
 }
@@ -1023,6 +1467,30 @@ void VesselProcessor::setStateInformation (const void* data, int size)
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return;
     auto state = juce::ValueTree::fromXml (*xml);
     if (! state.isValid()) return;
+
+    // Lossless V1 -> V2 state migration: populate any missing V2 params with legacy-preserving defaults
+    std::array<bool, NUM_PARAMS> present {};
+    for (int i = 0; i < state.getNumChildren(); ++i)
+    {
+        const auto child = state.getChild (i);
+        if (child.hasType ("PARAM"))
+        {
+            const int pid = pidForId (child.getProperty ("id").toString());
+            if (pid >= 0 && pid < NUM_PARAMS) present[(size_t) pid] = true;
+        }
+    }
+    for (int i = 0; i < NUM_PARAMS; ++i)
+    {
+        if (! present[(size_t) i])
+        {
+            juce::ValueTree p ("PARAM");
+            p.setProperty ("id", spec (i).id, nullptr);
+            p.setProperty ("value", (double) spec (i).def, nullptr);
+            state.appendChild (p, nullptr);
+            params[(size_t) i]->setValueNotifyingHost (params[(size_t) i]->getDefaultValue());
+        }
+    }
+    state.setProperty ("version", 2, nullptr);
 
     resetDrawTables();
     if (auto draw = state.getChildWithName ("DRAW"); draw.isValid())
@@ -1045,15 +1513,31 @@ void VesselProcessor::setStateInformation (const void* data, int size)
     const int maxProg = std::max (0, getNumPrograms() - 1);
     currentPreset.store (juce::jlimit (0, maxProg, (int) state.getProperty ("preset", 0)), std::memory_order_relaxed);
     torchOn = (bool) state.getProperty ("torch", false);
+    activeAB.store (juce::jlimit (0, 1, (int) state.getProperty ("activeAB", 0)), std::memory_order_release);
     {
-        const auto names = state.getChildWithName ("MACROS");   // absent in states saved before the macros existed
+        const auto names = state.getChildWithName ("MACROS");
         for (int m = 0; m < kNumMacros; ++m)
             setMacroName (m, names.isValid() ? names.getProperty ("m" + juce::String (m + 1)).toString() : juce::String());
     }
+    setXyLabels (state.getProperty ("xyLabelX", "TIMBRE").toString(), state.getProperty ("xyLabelY", "SPACE").toString());
+    {
+        const juce::ScopedLock sl (macroNameLock);
+        metaName = state.getProperty ("presetName", getProgramName (getCurrentProgram())).toString();
+        metaAuthor = state.getProperty ("presetAuthor", "iisben").toString();
+        metaCategory = state.getProperty ("presetCategory", "Init").toString();
+        metaTags = state.getProperty ("presetTags", "").toString();
+        metaDescription = state.getProperty ("presetDescription", "").toString();
+        metaFavorite = (bool) state.getProperty ("presetFavorite", false);
+    }
+    if (auto ml = state.getChildWithName ("MIDILEARN"); ml.isValid())
+        midiLearn.fromValueTree (ml, false);
 
     apvts.replaceState (state);
     tables.loadNow (pc (wt_table));
     refreshImpulseResponse (false);
+    const int slot = activeAB.load (std::memory_order_acquire);
+    abSlots[(size_t) slot] = captureSnapshot();
+    abSlots[(size_t) (1 - slot)] = abSlots[(size_t) slot];
     snapPending.store (true, std::memory_order_release);
 }
 

@@ -29,7 +29,7 @@ ParamSlider::ParamSlider (VesselProcessor& p, int id, Kind kind, const juce::Str
     setTooltip (juce::String (s.name) + juce::String::fromUTF8 ("  \xc2\xb7  double-click to type, option-click to reset")
                 + (dest ? juce::String::fromUTF8 ("  \xc2\xb7  right-click or drop an LFO here to modulate") : juce::String()));
 
-    attachment = std::make_unique<juce::SliderParameterAttachment> (param, *this, nullptr);
+    attachment = std::make_unique<juce::SliderParameterAttachment> (param, *this, &p.undoManager);
 }
 
 ParamSlider::~ParamSlider()
@@ -160,6 +160,16 @@ void ParamSlider::showRouteMenu()
         m.addSeparator();
         m.addItem (90, "Clear modulation", any);
     }
+    const int learnedCc = proc.midiLearn.ccForPid (pid);
+    const bool isLearning = proc.midiLearn.currentlyLearningPid() == pid;
+    m.addSeparator();
+    m.addItem (95, isLearning ? "Cancel MIDI Learn"
+                              : (learnedCc >= 0 ? "MIDI Learn (CC " + juce::String (learnedCc) + ")..."
+                                                : "MIDI Learn..."),
+               true, isLearning);
+    if (learnedCc >= 0)
+        m.addItem (96, "Clear MIDI CC " + juce::String (learnedCc));
+    m.addSeparator();
     m.addItem (98, juce::String::fromUTF8 ("Type a value\xe2\x80\xa6"));
     m.addItem (99, "Reset to default");
 
@@ -178,9 +188,21 @@ void ParamSlider::showRouteMenu()
             for (auto& src : sources) routing::remove (self.proc, src, self.pid);
             if (auto* l = self.findParentComponentOfClass<RouteListener>()) l->routesCleared (self.pid);
         }
+        else if (r == 95)
+        {
+            if (self.proc.midiLearn.currentlyLearningPid() == self.pid)
+                self.proc.midiLearn.cancelLearn();
+            else
+                self.proc.midiLearn.beginLearn (self.pid);
+        }
+        else if (r == 96)
+        {
+            self.proc.midiLearn.clearForPid (self.pid);
+        }
         else if (r == 98) self.openEntry();
         else if (r == 99)
         {
+            self.proc.beginUndoTransaction ("Reset parameter");
             self.param.beginChangeGesture();
             self.param.setValueNotifyingHost (self.param.getDefaultValue());
             self.param.endChangeGesture();
@@ -209,7 +231,7 @@ Rune::Rune (VesselProcessor& p, int id, const juce::String& caption, bool header
 {
     setButtonText (caption.isNotEmpty() ? caption : juce::String (vessel::spec (pid).name));
     getProperties().set ("header", header);
-    attachment = std::make_unique<juce::ButtonParameterAttachment> (*p.param (pid), *this, nullptr);
+    attachment = std::make_unique<juce::ButtonParameterAttachment> (*p.param (pid), *this, &p.undoManager);
 }
 
 //==============================================================================
@@ -266,7 +288,7 @@ Selector::Selector (VesselProcessor& p, int id, const juce::String& cap, bool co
 
     if (compact) box.setTooltip (caption);
     addAndMakeVisible (box);
-    attachment = std::make_unique<juce::ComboBoxParameterAttachment> (*choice, box, nullptr);
+    attachment = std::make_unique<juce::ComboBoxParameterAttachment> (*choice, box, &p.undoManager);
 }
 
 void Selector::paint (juce::Graphics& g)

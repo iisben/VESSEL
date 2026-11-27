@@ -1347,11 +1347,514 @@ GateResult runGate8()
     res.summary = std::to_string (activeVoices) + "v median=" + fmt (medUs, 1) + "us (" + fmt (rtPct, 2) + "% RT), p95=" + fmt (p95Pct, 2) + "% RT";
     return res;
 }
+
+//==============================================================================
+// STAGE 4 — Control-Plane QA (Macros, XY, MPE/MIDI, CC Learn, A/B, Undo, V1->V2)
+//==============================================================================
+GateResult runStage4ControlPlaneQA (const fs::path& outDir)
+{
+    GateResult res { 9, "Stage 4 Control-Plane QA", GateStatus::Pass, "", {} };
+    constexpr double sr = 48000.0;
+    auto rmsOf = [] (const std::vector<float>& x, size_t from = 0)
+    {
+        double sq = 0.0;
+        const size_t n = x.size() > from ? (x.size() - from) : 0;
+        for (size_t i = from; i < x.size(); ++i) sq += (double) x[i] * x[i];
+        return n > 0 ? linToDb (std::sqrt (sq / (double) n)) : -300.0;
+    };
+    auto centroidOf = [&] (const std::vector<float>& x, size_t offset)
+    {
+        constexpr int order = 13;
+        const int N = 1 << order;
+        auto spec = bhSpectrumPow (x, offset, order);
+        const double binHz = sr / (double) N;
+        double num = 0.0, den = 0.0;
+        for (int k = 1; k < N / 2; ++k)
+        {
+            const double mag = std::sqrt (spec[(size_t) k]);
+            num += ((double) k * binHz) * mag;
+            den += mag;
+        }
+        return den > 1.0e-12 ? num / den : 0.0;
+    };
+    auto peakFreqNear = [&] (const std::vector<float>& x, size_t offset, double loHz, double hiHz)
+    {
+        constexpr int order = 14;
+        const int N = 1 << order;
+        auto spec = bhSpectrumPow (x, offset, order);
+        const double binHz = sr / (double) N;
+        const int k0 = std::max (1, (int) std::floor (loHz / binHz));
+        const int k1 = std::min (N / 2 - 2, (int) std::ceil (hiHz / binHz));
+        int bestK = k0;
+        double bestP = -1.0;
+        for (int k = k0; k <= k1; ++k)
+            if (spec[(size_t) k] > bestP) { bestP = spec[(size_t) k]; bestK = k; }
+        // Parabolic interpolation on log power
+        const double pL = std::log (std::max (spec[(size_t) (bestK - 1)], 1.0e-30));
+        const double pC = std::log (std::max (spec[(size_t) bestK], 1.0e-30));
+        const double pR = std::log (std::max (spec[(size_t) (bestK + 1)], 1.0e-30));
+        const double denom = (pL - 2.0 * pC + pR);
+        const double delta = std::abs (denom) > 1.0e-12 ? 0.5 * (pL - pR) / denom : 0.0;
+        return ((double) bestK + std::clamp (delta, -0.5, 0.5)) * binHz;
+    };
+
+    int checksPass = 0, checksFail = 0;
+    auto record = [&] (const std::string& name, bool ok, const std::string& info)
+    {
+        if (ok) ++checksPass;
+        else { ++checksFail; res.status = GateStatus::Fail; }
+        res.details.push_back (name + ": " + info + " [" + (ok ? "OK" : "FAIL") + "]");
+    };
+
+    // 1) 4 Hero Performance Macros (labels + multi-dest bipolar V1 & V2 targets)
+    {
+        auto p = makeProcessor (sr, 512);
+        setCleanDryPatch (*p);
+        setP (*p, flt_on, 1.0f);
+        setP (*p, flt_a_cut, 600.0f);
+        setP (*p, flt_a_res, 0.1f);
+        setP (*p, flt_env, 0.0f);
+        setP (*p, amp_a, 1.0f);
+        setP (*p, amp_s, 1.0f);
+        p->setMacroName (0, "WEIGHT");
+        p->setMacroName (1, "FRACTURE");
+        p->setMacroName (2, "DRIFT");
+        p->setMacroName (3, "ABYSS");
+        const bool labelsOk = p->heroMacroLabel (0) == "WEIGHT" && p->heroMacroLabel (1) == "FRACTURE"
+                           && p->heroMacroLabel (2) == "DRIFT"  && p->heroMacroLabel (3) == "ABYSS";
+        setP (*p, mac1_dest1, (float) destIndexOf (flt_a_cut));
+        setP (*p, mac1_amt1,  0.75f);
+        setP (*p, mac1_dest2, (float) destIndexOf (v2_tex_mix));
+        setP (*p, mac1_amt2,  0.50f);
+        setP (*p, mac2_dest1, (float) destIndexOf (flt_a_cut));
+        setP (*p, mac2_amt1, -0.45f); // bipolar negative
+        setP (*p, mac3_dest1, (float) destIndexOf (v2_organic_amt));
+        setP (*p, mac3_amt1,  0.80f);
+        setP (*p, mac4_dest1, (float) destIndexOf (verb_mix));
+        setP (*p, mac4_amt1,  0.70f);
+        setP (*p, verb_on, 1.0f);
+        setP (*p, verb_mix, 0.0f);
+
+        const std::vector<MidiEvent> ev { { 0, juce::MidiMessage::noteOn (1, 48, 0.9f) } };
+        p->prepareToPlay (sr, 512);
+        maybeSeedQa (*p, 0x4001u);
+        auto rBase = renderEvents (*p, sr, 24000, { 512 }, ev);
+        const double cBase = centroidOf (rBase.l, 8000);
+
+        setP (*p, macro1, 1.0f);
+        p->prepareToPlay (sr, 512);
+        maybeSeedQa (*p, 0x4001u);
+        auto rM1 = renderEvents (*p, sr, 24000, { 512 }, ev);
+        const double cM1 = centroidOf (rM1.l, 8000);
+
+        setP (*p, macro1, 0.0f);
+        setP (*p, macro2, 1.0f);
+        p->prepareToPlay (sr, 512);
+        maybeSeedQa (*p, 0x4001u);
+        auto rM2 = renderEvents (*p, sr, 24000, { 512 }, ev);
+        const double cM2 = centroidOf (rM2.l, 8000);
+
+        const bool ok = labelsOk && (cM1 > cBase * 1.8) && (cM2 < cBase * 0.85)
+                     && rM1.nonFiniteCount == 0 && rM2.nonFiniteCount == 0;
+        record ("Hero Macros (1-4)", ok,
+                "baseCent=" + fmt (cBase, 0) + "Hz, M1(+cut/+tex)=" + fmt (cM1, 0) + "Hz, M2(-cut)=" + fmt (cM2, 0) + "Hz");
+    }
+
+    // 2) XY Sculptor Backend (neutral center bit-exact, bipolar X/Y, odd-block invariant)
+    {
+        auto p = makeProcessor (sr, 512);
+        setCleanDryPatch (*p);
+        setP (*p, flt_on, 1.0f);
+        setP (*p, flt_a_cut, 900.0f);
+        setP (*p, flt_env, 0.0f);
+        setP (*p, amp_a, 1.0f);
+        setP (*p, amp_s, 1.0f);
+        const std::vector<MidiEvent> ev { { 0, juce::MidiMessage::noteOn (1, 48, 0.9f) } };
+
+        p->prepareToPlay (sr, 512);
+        maybeSeedQa (*p, 0x4002u);
+        auto rNoRoute = renderEvents (*p, sr, 24000, { 512 }, ev);
+
+        setP (*p, v2_xy_x_dest1, (float) destIndexOf (flt_a_cut));
+        setP (*p, v2_xy_x_amt1, 0.65f);
+        setP (*p, v2_xy_y_dest1, (float) destIndexOf (v2_tex_mix));
+        setP (*p, v2_xy_y_amt1, 0.55f);
+        p->setXyPosition (0.5f, 0.5f);
+        p->prepareToPlay (sr, 512);
+        maybeSeedQa (*p, 0x4002u);
+        auto rCenter = renderEvents (*p, sr, 24000, { 512 }, ev);
+
+        float maxCenterDiff = 0.0f;
+        for (size_t i = 0; i < rNoRoute.l.size(); ++i)
+            maxCenterDiff = std::max (maxCenterDiff, std::abs (rNoRoute.l[i] - rCenter.l[i]));
+
+        p->setXyPosition (1.0f, 1.0f);
+        p->prepareToPlay (sr, 512);
+        maybeSeedQa (*p, 0x4002u);
+        auto rCorner = renderEvents (*p, sr, 24000, { 512 }, ev);
+
+        p->prepareToPlay (sr, 512);
+        maybeSeedQa (*p, 0x4002u);
+        auto rCornerOdd = renderEvents (*p, sr, 24000, { 1, 7, 13, 64, 137, 512 }, ev);
+        float maxOddDiff = 0.0f;
+        for (size_t i = 0; i < rCorner.l.size(); ++i)
+            maxOddDiff = std::max (maxOddDiff, std::abs (rCorner.l[i] - rCornerOdd.l[i]));
+
+        const double cCenter = centroidOf (rCenter.l, 8000);
+        const double cCorner = centroidOf (rCorner.l, 8000);
+        const bool ok = (linToDb (maxCenterDiff) < -120.0) && (cCorner > cCenter * 1.8)
+                     && (linToDb (maxOddDiff) < -100.0);
+        record ("XY Sculptor", ok,
+                "centerDiff=" + fmt (linToDb (maxCenterDiff), 1) + "dBFS, cent " + fmt (cCenter, 0)
+                + "->" + fmt (cCorner, 0) + "Hz, oddRes=" + fmt (linToDb (maxOddDiff), 1) + "dBFS");
+    }
+
+    // 3) MPE Per-Note Pitch Bend (±48 st), Slide (CC74), Poly Aftertouch, Breath (CC2), Velocity Curves
+    {
+        // 3a: MPE Per-Note Pitch Bend (+12 st on Ch 2 ONLY while Ch 3 stays stationary)
+        auto p = makeProcessor (sr, 512);
+        setCleanDryPatch (*p);
+        setP (*p, wt_on, 0.0f);
+        setP (*p, sub_on, 1.0f);
+        setP (*p, sub1_oct, 0.0f);     // 0 oct = pure fundamental sine
+        setP (*p, sub1_level, 0.85f);
+        setP (*p, sub2_level, 0.0f);
+        setP (*p, sub1_shape, 0.0f);
+        setP (*p, flt_on, 0.0f);
+        setP (*p, amp_a, 2.0f);
+        setP (*p, amp_s, 1.0f);
+        setP (*p, v2_mpe_on, 1.0f);
+        setP (*p, v2_mpe_bend, 48.0f);
+        p->prepareToPlay (sr, 512);
+
+        // Ch 2 plays C4 (60 = 261.63 Hz) bent +12 st -> C5 (523.25 Hz); Ch 3 plays G4 (67 = 392.00 Hz) unbent
+        const int pbPlus12 = 8192 + (int) std::lround (8192.0 * (12.0 / 48.0)); // 10240
+        const std::vector<MidiEvent> evMpe {
+            { 0, juce::MidiMessage::noteOn (2, 60, 0.85f) },
+            { 0, juce::MidiMessage::noteOn (3, 67, 0.85f) },
+            { 64, juce::MidiMessage::pitchWheel (2, pbPlus12) },
+        };
+        auto rMpe = renderEvents (*p, sr, 32768, { 512 }, evMpe);
+        const double fCh3 = peakFreqNear (rMpe.l, 12000, 350.0, 430.0); // G4 ~ 392.00 Hz
+        const double fCh2 = peakFreqNear (rMpe.l, 12000, 480.0, 560.0); // C5 ~ 523.25 Hz
+        const double ctCh3 = std::abs (1200.0 * std::log2 (fCh3 / 391.9954));
+        const double ctCh2 = std::abs (1200.0 * std::log2 (fCh2 / 523.2511));
+        const bool mpeBendOk = (ctCh3 < 15.0) && (ctCh2 < 20.0);
+
+        // 3b: MPE Slide (CC74) & Poly Aftertouch per-note isolation + Breath (CC2)
+        auto p2 = makeProcessor (sr, 512);
+        setCleanDryPatch (*p2);
+        setP (*p2, flt_on, 1.0f);
+        setP (*p2, flt_a_cut, 220.0f);
+        setP (*p2, flt_env, 0.0f);
+        setP (*p2, amp_a, 2.0f);
+        setP (*p2, amp_s, 1.0f);
+        setP (*p2, v2_mpe_on, 1.0f);
+        setP (*p2, v2_slide_dest1, (float) destIndexOf (flt_a_cut));
+        setP (*p2, v2_slide_amt1, 0.85f);
+        setP (*p2, at_dest1, (float) destIndexOf (flt_a_cut));
+        setP (*p2, at_amt1, 0.85f);
+        setP (*p2, v2_breath_dest1, (float) destIndexOf (flt_a_cut));
+        setP (*p2, v2_breath_amt1, 0.85f);
+
+        p2->prepareToPlay (sr, 512);
+        auto rDark = renderEvents (*p2, sr, 24000, { 512 }, { { 0, juce::MidiMessage::noteOn (2, 48, 0.85f) } });
+        // Send CC74 ONLY on Ch 3 while note is on Ch 2 -> must stay dark (per-channel isolation!)
+        p2->prepareToPlay (sr, 512);
+        auto rOtherChSlide = renderEvents (*p2, sr, 24000, { 512 }, {
+            { 0, juce::MidiMessage::noteOn (2, 48, 0.85f) },
+            { 64, juce::MidiMessage::controllerEvent (3, 74, 127) }
+        });
+        // Send CC74 on Ch 2 -> must open filter!
+        p2->prepareToPlay (sr, 512);
+        auto rSameChSlide = renderEvents (*p2, sr, 24000, { 512 }, {
+            { 0, juce::MidiMessage::noteOn (2, 48, 0.85f) },
+            { 64, juce::MidiMessage::controllerEvent (2, 74, 127) }
+        });
+        // Polyphonic key pressure on note 48 vs note 60 (note 60 pressure must NOT open note 48!)
+        p2->prepareToPlay (sr, 512);
+        auto rPolyOther = renderEvents (*p2, sr, 24000, { 512 }, {
+            { 0, juce::MidiMessage::noteOn (2, 48, 0.85f) },
+            { 64, juce::MidiMessage::aftertouchChange (2, 60, 127) }
+        });
+        p2->prepareToPlay (sr, 512);
+        auto rPolySame = renderEvents (*p2, sr, 24000, { 512 }, {
+            { 0, juce::MidiMessage::noteOn (2, 48, 0.85f) },
+            { 64, juce::MidiMessage::aftertouchChange (2, 48, 127) }
+        });
+        // Breath CC2 opens filter
+        p2->prepareToPlay (sr, 512);
+        auto rBreath = renderEvents (*p2, sr, 24000, { 512 }, {
+            { 0, juce::MidiMessage::noteOn (2, 48, 0.85f) },
+            { 64, juce::MidiMessage::controllerEvent (1, 2, 127) }
+        });
+
+        const double cDark = centroidOf (rDark.l, 8000);
+        const double cOtherSl = centroidOf (rOtherChSlide.l, 8000);
+        const double cSameSl = centroidOf (rSameChSlide.l, 8000);
+        const double cPolySame = centroidOf (rPolySame.l, 8000);
+        const double cBreath = centroidOf (rBreath.l, 8000);
+        const bool mpeExprOk = (std::abs (cOtherSl - cDark) < 25.0)
+                            && (cSameSl > cDark * 2.5)
+                            && (cPolySame > cDark * 2.5)
+                            && (cBreath > cDark * 2.5);
+        juce::ignoreUnused (rPolyOther);
+
+        // 3c: Selectable Velocity Curves (Hard < Linear < Soft < Fixed at vel=0.5)
+        auto renderCurve = [&] (int curve)
+        {
+            auto pv = makeProcessor (sr, 512);
+            setCleanDryPatch (*pv);
+            setP (*pv, flt_on, 0.0f);
+            setP (*pv, vel_amp, 1.0f);
+            setP (*pv, v2_vel_curve, (float) curve);
+            pv->prepareToPlay (sr, 512);
+            auto r = renderEvents (*pv, sr, 12000, { 512 }, { { 0, juce::MidiMessage::noteOn (1, 48, 0.5f) } });
+            return rmsOf (r.l, 2000);
+        };
+        const double rmsLin = renderCurve (0);
+        const double rmsSoft = renderCurve (1);
+        const double rmsHard = renderCurve (2);
+        const double rmsFixed = renderCurve (4);
+        const bool velCurveOk = (rmsHard < rmsLin - 2.0) && (rmsLin < rmsSoft - 1.0) && (rmsSoft < rmsFixed - 1.0);
+
+        record ("MPE & Expression", mpeBendOk && mpeExprOk && velCurveOk,
+                "MPEbend Ch2=" + fmt (fCh2, 1) + "Hz(" + fmt (ctCh2, 1) + "ct) Ch3=" + fmt (fCh3, 1) + "Hz(" + fmt (ctCh3, 1)
+                + "ct), Slide/AT/Breath=" + fmt (cSameSl, 0) + "/" + fmt (cPolySame, 0) + "/" + fmt (cBreath, 0)
+                + "Hz vs dark " + fmt (cDark, 0) + "Hz, Vel(H/L/S/F)=" + fmt (rmsHard, 1) + "/" + fmt (rmsLin, 1)
+                + "/" + fmt (rmsSoft, 1) + "/" + fmt (rmsFixed, 1) + "dB");
+    }
+
+    // 4) Thread-Safe MIDI CC Learn (bind on audio thread, drive param, persist & reload, clear)
+    {
+        const auto tmpDir = juce::File (fs::absolute (outDir / "stage4_tmp").string());
+        tmpDir.deleteRecursively();
+        tmpDir.createDirectory();
+
+        auto p = makeProcessor (sr, 512);
+        p->midiLearn.setStorageDirectory (tmpDir);
+        setCleanDryPatch (*p);
+        setP (*p, flt_on, 1.0f);
+        setP (*p, flt_a_cut, 220.0f);
+        setP (*p, flt_env, 0.0f);
+        setP (*p, amp_a, 2.0f);
+        setP (*p, amp_s, 1.0f);
+        p->prepareToPlay (sr, 512);
+        auto rBefore = renderEvents (*p, sr, 20000, { 512 }, { { 0, juce::MidiMessage::noteOn (1, 48, 0.85f) } });
+
+        p->midiLearn.beginLearn (flt_a_cut);
+        p->prepareToPlay (sr, 512);
+        auto rAfter = renderEvents (*p, sr, 20000, { 512 }, {
+            { 0, juce::MidiMessage::noteOn (1, 48, 0.85f) },
+            { 64, juce::MidiMessage::controllerEvent (1, 21, 127) }
+        });
+        const bool learnedOk = (p->midiLearn.ccForPid (flt_a_cut) == 21) && (p->midiLearn.currentlyLearningPid() == -1);
+        const bool savedOk = p->midiLearn.saveToDisk();
+
+        MidiLearnMap reloaded;
+        reloaded.setStorageDirectory (tmpDir);
+        const bool loadedOk = reloaded.loadFromDisk() && (reloaded.ccForPid (flt_a_cut) == 21);
+        reloaded.clearForPid (flt_a_cut);
+        const bool clearedOk = (reloaded.ccForPid (flt_a_cut) == -1);
+
+        const double cBefore = centroidOf (rBefore.l, 8000);
+        const double cAfter = centroidOf (rAfter.l, 8000);
+        const bool ok = learnedOk && savedOk && loadedOk && clearedOk && (cAfter > cBefore * 2.5);
+        record ("MIDI CC Learn", ok,
+                "CC21->flt_a_cut cent " + fmt (cBefore, 0) + "->" + fmt (cAfter, 0) + "Hz, persist=" + (loadedOk ? "OK" : "FAIL"));
+    }
+
+    // 5) A/B State Compare + Copy A->B (click-free mid-note transition)
+    {
+        auto p = makeProcessor (sr, 512);
+        setCleanDryPatch (*p);
+        setP (*p, flt_on, 1.0f);
+        setP (*p, flt_a_cut, 260.0f);
+        setP (*p, flt_env, 0.0f);
+        setP (*p, amp_a, 2.0f);
+        setP (*p, amp_s, 1.0f);
+        p->copyAToB();
+        p->setActiveABSlot (1);
+        setP (*p, flt_a_cut, 12000.0f); // Slot B = bright, Slot A = dark
+        p->prepareToPlay (sr, 512);
+
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer m;
+        m.addEvent (juce::MidiMessage::noteOn (1, 48, 0.85f), 0);
+        p->processBlock (buf, m);
+        m.clear();
+
+        std::vector<float> audioB, audioTrans, audioA;
+        for (int b = 0; b < 24; ++b)
+        {
+            buf.clear();
+            p->processBlock (buf, m);
+            const float* ch = buf.getReadPointer (0);
+            audioB.insert (audioB.end(), ch, ch + 512);
+        }
+        // Switch B -> A mid-note (click-free!)
+        p->setActiveABSlot (0);
+        for (int b = 0; b < 32; ++b)
+        {
+            buf.clear();
+            p->processBlock (buf, m);
+            const float* ch = buf.getReadPointer (0);
+            if (b < 4) audioTrans.insert (audioTrans.end(), ch, ch + 512);
+            else       audioA.insert (audioA.end(), ch, ch + 512);
+        }
+        const double cB = centroidOf (audioB, 2048);
+        const double cA = centroidOf (audioA, 2048);
+        auto max2ndDiff = [] (const std::vector<float>& x, size_t from, size_t to)
+        {
+            float mx = 0.0f;
+            for (size_t i = std::max<size_t> (2, from); i < std::min (to, x.size()); ++i)
+                mx = std::max (mx, std::abs (x[i] - 2.0f * x[i - 1] + x[i - 2]));
+            return mx;
+        };
+        const float steadyStep = max2ndDiff (audioB, 2048, audioB.size());
+        const float transStep = max2ndDiff (audioTrans, 0, audioTrans.size());
+        const bool clickFree = (transStep <= std::max (steadyStep * 3.0f, 0.08f));
+        const bool abValOk = (p->activeABSlot() == 0) && (std::abs (p->param (flt_a_cut)->convertFrom0to1 (p->param (flt_a_cut)->getValue()) - 260.0f) < 5.0f);
+        const bool ok = abValOk && clickFree && (cB > cA * 2.5);
+        record ("A/B Compare + Copy", ok,
+                "B=" + fmt (cB, 0) + "Hz -> A=" + fmt (cA, 0) + "Hz, trans2ndDiff=" + fmt (transStep, 4) + " vs steady " + fmt (steadyStep, 4));
+    }
+
+    // 6) Undo / Redo Manager
+    {
+        auto p = makeProcessor (sr, 512);
+        auto getCut = [&] { return p->param (flt_a_cut)->convertFrom0to1 (p->param (flt_a_cut)->getValue()); };
+        p->clearUndoHistory();
+        p->beginUndoTransaction ("Cut 500");
+        setP (*p, flt_a_cut, 500.0f);
+        p->flushUndoState();
+        p->beginUndoTransaction ("Cut 4000");
+        setP (*p, flt_a_cut, 4000.0f);
+        p->flushUndoState();
+        p->beginUndoTransaction ("Cut 9000");
+        setP (*p, flt_a_cut, 9000.0f);
+        p->flushUndoState();
+
+        const bool u1 = p->canUndo() && p->undo();
+        const float afterU1 = getCut();
+        const bool u2 = p->canUndo() && p->undo();
+        const float afterU2 = getCut();
+        const bool r1 = p->canRedo() && p->redo();
+        const float afterR1 = getCut();
+        const bool r2 = p->canRedo() && p->redo();
+        const float afterR2 = getCut();
+        const bool ok = u1 && u2 && r1 && r2
+                     && std::abs (afterU1 - 4000.0f) < 5.0f
+                     && std::abs (afterU2 - 500.0f) < 5.0f
+                     && std::abs (afterR1 - 4000.0f) < 5.0f
+                     && std::abs (afterR2 - 9000.0f) < 5.0f;
+        record ("Undo / Redo", ok,
+                "9000 -> undo(" + fmt (afterU1, 0) + ") -> undo(" + fmt (afterU2, 0)
+                + ") -> redo(" + fmt (afterR1, 0) + ") -> redo(" + fmt (afterR2, 0) + ")");
+    }
+
+    // 7) Versioned Preset Manager (version="2") & Lossless V1 -> V2 Migration (±0.05 dB RMS)
+    {
+        const auto tmpDir = juce::File (fs::absolute (outDir / "stage4_tmp").string());
+        auto p = makeProcessor (sr, 512);
+        p->presetManager.setStorageDirectory (tmpDir);
+        setCleanDryPatch (*p);
+        setP (*p, flt_a_cut, 1234.0f);
+        setP (*p, v2_organic_amt, 0.42f);
+        setP (*p, v2_tex_mix, 0.25f);
+        p->setMacroName (0, "MONOLITH");
+        p->setXyLabels ("GRIT", "VOID");
+
+        auto captured = p->captureCurrentPreset ("Monolith Test", "VESSEL QA", "Bass", "Dark|Sub|MPE", "Stage 4 roundtrip preset", true);
+        juce::File written;
+        const bool saved = p->presetManager.saveUserPreset (captured, &written);
+        const auto hits = p->presetManager.search ("mpe", "Bass", true);
+        bool roundtripOk = saved && written.existsAsFile() && ! hits.empty();
+        if (roundtripOk)
+        {
+            const auto& loaded = p->presetManager.allPresets()[(size_t) hits[0]];
+            roundtripOk = (loaded.schemaVersion == 2) && loaded.name == "Monolith Test" && loaded.author == "VESSEL QA"
+                       && loaded.favorite && loaded.xyLabelX == "GRIT" && loaded.xyLabelY == "VOID"
+                       && loaded.macroNames[0] == "MONOLITH";
+        }
+
+        // Lossless V1 -> V2 state migration across 4 diverse factory presets
+        const auto& bank = PresetBank::factory().all();
+        const std::vector<size_t> testIdx { 0, std::min<size_t> (12, bank.size() - 1),
+                                            std::min<size_t> (35, bank.size() - 1), std::min<size_t> (65, bank.size() - 1) };
+        double maxMigDiffDb = 0.0;
+        bool v2ResetOk = true;
+        for (size_t idx : testIdx)
+        {
+            const auto& pr = bank[idx];
+            const auto refM = measurePresetSnapshot (pr, sr);
+
+            // Serialize state, then strip version + all v2_* params to simulate a legacy V1 DAW session
+            auto pSrc = makeProcessor (sr, 512);
+            pSrc->applyPreset (pr);
+            juce::MemoryBlock stateBin;
+            pSrc->getStateInformation (stateBin);
+            auto xml = juce::AudioProcessor::getXmlFromBinary (stateBin.getData(), (int) stateBin.getSize());
+            xml->removeAttribute ("version");
+            std::vector<juce::XmlElement*> toRemove;
+            for (auto* ch : xml->getChildWithTagNameIterator ("PARAM"))
+                if (ch->getStringAttribute ("id").startsWith ("v2_"))
+                    toRemove.push_back (ch);
+            for (auto* ch : toRemove) xml->removeChildElement (ch, true);
+            juce::MemoryBlock v1Bin;
+            juce::AudioProcessor::copyXmlToBinary (*xml, v1Bin);
+
+            // Dirty a fresh V2 processor with extreme V2 values, then load the stripped V1 binary state
+            auto pDst = makeProcessor (sr, 512);
+            setP (*pDst, v2_organic_amt, 0.95f);
+            setP (*pDst, v2_organic_floor, 0.85f);
+            setP (*pDst, v2_tex_mix, 0.90f);
+            setP (*pDst, v2_xy_x, 1.0f);
+            setP (*pDst, v2_xy_y, 0.0f);
+            setP (*pDst, v2_mpe_on, 1.0f);
+            setP (*pDst, v2_pb_range, 24.0f);
+            setP (*pDst, v2_vel_curve, 2.0f);
+            pDst->setStateInformation (v1Bin.getData(), (int) v1Bin.getSize());
+
+            if (pDst->param (v2_organic_amt)->getValue() > 1.0e-5f
+                || pDst->param (v2_tex_mix)->getValue() > 1.0e-5f
+                || std::abs (pDst->param (v2_xy_x)->getValue() - 0.5f) > 1.0e-5f
+                || pDst->param (v2_mpe_on)->getValue() > 0.5f)
+                v2ResetOk = false;
+
+            pDst->prepareToPlay (sr, 512);
+            maybeSeedQa (*pDst, 0x5EED2027u);
+            const int total = (int) (1.5 * sr);
+            auto rMig = renderEvents (*pDst, sr, total, { 512 }, {
+                { 0, juce::MidiMessage::noteOn (1, 48, 0.85f) },
+                { 0, juce::MidiMessage::noteOn (1, 60, 0.75f) },
+                { (int) (1.0 * sr), juce::MidiMessage::noteOff (1, 48) },
+                { (int) (1.0 * sr), juce::MidiMessage::noteOff (1, 60) }
+            });
+            double sq = 0.0;
+            for (int i = 0; i < total; ++i)
+                sq += 0.5 * ((double) rMig.l[(size_t) i] * rMig.l[(size_t) i] + (double) rMig.r[(size_t) i] * rMig.r[(size_t) i]);
+            const double migRms = linToDb (std::sqrt (sq / (double) total));
+            maxMigDiffDb = std::max (maxMigDiffDb, std::abs (migRms - refM.rmsDb));
+        }
+
+        tmpDir.deleteRecursively();
+        const bool ok = roundtripOk && v2ResetOk && (maxMigDiffDb <= 0.05);
+        record ("V2 Preset & V1 Migration", ok,
+                "V2 roundtrip=" + std::string (roundtripOk ? "OK" : "FAIL")
+                + ", V1->V2 reset=" + std::string (v2ResetOk ? "OK" : "FAIL")
+                + ", maxRMSdiff=" + fmt (maxMigDiffDb, 4) + "dB (lim<=0.05)");
+    }
+
+    res.summary = "checks PASS=" + std::to_string (checksPass) + " FAIL=" + std::to_string (checksFail);
+    return res;
+}
 } // namespace
 
 int main (int argc, char** argv)
 {
     bool baselineMode = false;
+    bool runStage4 = false;
     std::set<int> enabledGates { 1, 2, 3, 4, 5, 6, 7, 8 };
     fs::path outDir = "build/vessel2_qa";
     fs::path compareV1;
@@ -1361,6 +1864,7 @@ int main (int argc, char** argv)
         const std::string arg = argv[i];
         if (arg == "--baseline") baselineMode = true;
         else if (arg == "--strict") baselineMode = false;
+        else if (arg == "--stage4-qa") runStage4 = true;
         else if (arg == "--out-dir" && i + 1 < argc) outDir = argv[++i];
         else if (arg == "--compare-v1" && i + 1 < argc) compareV1 = argv[++i];
         else if (arg == "--gates" && i + 1 < argc)
@@ -1386,6 +1890,7 @@ int main (int argc, char** argv)
     if (enabledGates.count (6)) results.push_back (runGate6());
     if (enabledGates.count (7)) results.push_back (runGate7 (outDir, compareV1));
     if (enabledGates.count (8)) results.push_back (runGate8());
+    if (runStage4) results.push_back (runStage4ControlPlaneQA (outDir));
 
     fs::create_directories (outDir);
     std::ofstream report (outDir / "qa_report.txt");
