@@ -25,7 +25,8 @@ namespace ink
     const juce::Colour seamHi  { 0xff343b49 };
     const juce::Colour pewter  { 0xffa4adc0 };   // secondary text (lifted for legibility: 7.9:1 on the ground)
     const juce::Colour frost   { 0xffe9eef6 };   // primary text, values
-    const juce::Colour violet  { 0xffb57bff };   // active / value (neon: OKLCH L 0.70, C 0.19, h 302)
+    const juce::Colour violet  { 0xffcc8eff };   // active / value (brightened electric neon purple)
+    const juce::Colour violetHi{ 0xffe6c6ff };   // specular lavender-violet highlight
     const juce::Colour chlorine{ 0xff4fe3cf };   // modulation
     const juce::Colour blood   { 0xffff3b5c };   // clipping only
 }

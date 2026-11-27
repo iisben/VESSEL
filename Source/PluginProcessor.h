@@ -32,6 +32,11 @@ struct Telemetry
     std::atomic<float> xyX { 0.5f }, xyY { 0.5f };
     std::atomic<bool>  mpeActive { false };
     std::atomic<bool>  grainLooping { false };
+    // Lock-free backdrop reactivity telemetry (audio thread -> OpenGL backdrop)
+    std::atomic<uint32_t> keyPulseSeq { 0 };
+    std::atomic<float> keyPulseVel { 0.0f }, keyNoteNorm { 0.5f };
+    std::atomic<float> keyHold { 0.0f }, polyTouch { 0.0f };
+    std::atomic<int>   heldCount { 0 };
     std::array<std::atomic<float>, vessel::NUM_PARAMS> modOffset {};   // live normalised modulation per parameter
 
     // stereo scope ring (written by audio, read by UI). Relaxed atomics: a plain store on arm64/x86, but no data race.
@@ -261,7 +266,7 @@ private:
     // expression (audio thread): raw MIDI values and their smoothed versions (global + MPE + per-voice)
     float mwRaw = 0, atRaw = 0, velRaw = 0, mwS = 0, atS = 0, velS = 0;
     float bendNormRaw = 0, bendNormS = 0;
-    float breathRaw = 0, breathS = 0, slideRaw = 0, slideS = 0, activeMaxPressS = 0;
+    float breathRaw = 0, breathS = 0, slideRaw = 0, slideS = 0, activeMaxPressS = 0, keyHoldAccum = 0;
     int mpeMasterChannel = 1;
     bool sustainHeld = false;
     bool polyPressSeen = false;

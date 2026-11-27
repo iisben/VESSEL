@@ -179,6 +179,7 @@ void VesselProcessor::resetExpressionState() noexcept
     mwRaw = atRaw = velRaw = mwS = atS = velS = 0.0f;
     bendNormRaw = bendNormS = 0.0f;
     breathRaw = breathS = slideRaw = slideS = activeMaxPressS = 0.0f;
+    keyHoldAccum = 0.0f;
     sustainHeld = false;
     polyPressSeen = false;
     for (auto& c : mpeCh) c = MpeChannelState {};
@@ -284,6 +285,9 @@ void VesselProcessor::handleMidi (const juce::MidiMessage& m)
         }
 
         textureBus.noteOn (note, shapedVel);
+        telemetry.keyPulseVel.store (shapedVel, std::memory_order_relaxed);
+        telemetry.keyNoteNorm.store (std::clamp ((float) (note - 24) / 72.0f, 0.0f, 1.0f), std::memory_order_relaxed);
+        telemetry.keyPulseSeq.fetch_add (1u, std::memory_order_release);
         midiDirty = true;
         if (fromSilence) tape.noteOnFromSilence (tp);
         if (pb (duck_on)) ducker.trigger();
@@ -463,6 +467,43 @@ void VesselProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     telemetry.breath = breathS; telemetry.slide = slideS;
     telemetry.xyX = pv (v2_xy_x); telemetry.xyY = pv (v2_xy_y);
     telemetry.mpeActive = pb (v2_mpe_on);
+    {
+        int held = 0;
+        float polyPressPeak = 0.0f;
+        float polyPressEnergy = 0.0f;
+        const bool mpeOnNow = pb (v2_mpe_on);
+        for (int v = 0; v < VoiceManager::kVoices; ++v)
+        {
+            if (voices.voiceActive (v))
+            {
+                const auto& ve = voiceExpr[(size_t) v];
+                if (ve.gateHeld) ++held;
+                float vp = ve.polyPressS;
+                if (mpeOnNow)
+                {
+                    const float mp = ve.latched ? ve.latchedPress : mpeCh[(size_t) juce::jlimit (1, 16, ve.channel)].pressS;
+                    vp = std::max (vp, mp);
+                }
+                polyPressPeak = std::max (polyPressPeak, vp);
+                polyPressEnergy += vp;
+            }
+        }
+        if (voices.anyHeld() && held == 0) held = 1;
+        const float dt = (float) n / (float) std::max (1.0, sr);
+        if (held > 0)
+        {
+            const float chordBoost = 1.0f + 0.16f * (float) std::min (held - 1, 5);
+            keyHoldAccum = std::min (1.0f, keyHoldAccum + dt * 0.42f * chordBoost);
+        }
+        else
+        {
+            keyHoldAccum = flushDenormal (keyHoldAccum * std::exp (-dt / 0.68f));
+        }
+        const float combinedTouch = std::clamp (std::max ({ atS, polyPressPeak, std::min (1.0f, polyPressEnergy * 0.65f) }), 0.0f, 1.0f);
+        telemetry.heldCount.store (held, std::memory_order_relaxed);
+        telemetry.keyHold.store (keyHoldAccum, std::memory_order_relaxed);
+        telemetry.polyTouch.store (combinedTouch, std::memory_order_relaxed);
+    }
     const auto og = ott.bandGainDb();
     for (int b = 0; b < 3; ++b) telemetry.ottGain[b] = og[(size_t) b];
     for (int i = 0; i < NUM_PARAMS; ++i) telemetry.modOffset[(size_t) i].store (mod[(size_t) i], std::memory_order_relaxed);

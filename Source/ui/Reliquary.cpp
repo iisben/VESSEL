@@ -110,7 +110,8 @@ juce::Slider::SliderLayout ReliquaryLookAndFeel::getSliderLayout (juce::Slider& 
 }
 
 //==============================================================================
-/** HALO DIAL — an engraved ring of 37 ticks, a blade needle, a chlorine arc for live modulation. */
+/** HALO DIAL — an engraved ring of 37 ticks around a sculpted dark-obsidian 3D knob cap,
+    a lifted blade needle, and a chlorine arc for live modulation. */
 void ReliquaryLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float, float start, float end, juce::Slider& s)
 {
     using namespace ink;
@@ -120,6 +121,7 @@ void ReliquaryLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
     const bool bipolar = (bool) s.getProperties()["bipolar"];
     const float modOff = (float) s.getProperties()["mod"];
     const float pos = (float) s.valueToProportionOfLength (s.getValue());
+    const float fill = bipolar ? std::abs (pos - 0.5f) * 2.0f : pos;
 
     const float capH = 13.0f, valH = 15.0f;
     auto ringArea = bounds.withTrimmedTop (capH).withTrimmedBottom (valH);
@@ -129,12 +131,11 @@ void ReliquaryLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
 
     auto polar = [&] (float angle, float r) { return juce::Point<float> (c.x + r * std::sin (angle), c.y - r * std::cos (angle)); };
 
-    // faint fill: the vessel holds what you pour into it
+    // neon purple ambient halo behind the dial
     {
-        const float fill = bipolar ? std::abs (pos - 0.5f) * 2.0f : pos;
-        juce::ColourGradient glow (violet.withAlpha (0.05f + 0.16f * fill), c.x, c.y, violet.withAlpha (0.0f), c.x + R, c.y, true);
+        juce::ColourGradient glow (violet.withAlpha (0.07f + 0.22f * fill), c.x, c.y, violet.withAlpha (0.0f), c.x + R * 1.05f, c.y, true);
         g.setGradientFill (glow);
-        g.fillEllipse (juce::Rectangle<float> (R * 1.6f, R * 1.6f).withCentre (c));
+        g.fillEllipse (juce::Rectangle<float> (R * 1.9f, R * 1.9f).withCentre (c));
     }
 
     // drop target: a source is being dragged (faint ring) / is over this control (bright ring)
@@ -160,6 +161,7 @@ void ReliquaryLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
         }
     }
 
+    // outer engraved 37-tick halo
     constexpr int N = 37;
     for (int i = 0; i < N; ++i)
     {
@@ -170,8 +172,16 @@ void ReliquaryLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
         const bool major = (i % 9) == 0;
         float r0, r1, th;
         juce::Colour col;
-        if (active) { r0 = R * 0.66f; r1 = R * 0.90f; th = 1.35f; col = violet.withAlpha (hot ? 1.0f : 0.88f); }
-        else        { r0 = R * (major ? 0.70f : 0.76f); r1 = R * 0.90f; th = 1.0f; col = pewter.withAlpha (major ? 0.55f : (hot ? 0.38f : 0.26f)); }
+        if (active)
+        {
+            r0 = R * 0.69f; r1 = R * 0.92f; th = 1.45f;
+            col = (dragging ? violetHi : violet).withAlpha (hot ? 1.0f : 0.92f);
+        }
+        else
+        {
+            r0 = R * (major ? 0.72f : 0.78f); r1 = R * 0.92f; th = 1.0f;
+            col = pewter.withAlpha (major ? 0.56f : (hot ? 0.40f : 0.27f));
+        }
         g.setColour (col);
         g.drawLine ({ polar (a, r0), polar (a, r1) }, th);
     }
@@ -183,27 +193,110 @@ void ReliquaryLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
         const float a0 = start + pos * (end - start), a1 = start + p1 * (end - start);
         juce::Path arc;
         arc.addCentredArc (c.x, c.y, R, R, 0.0f, std::min (a0, a1), std::max (a0, a1), true);
-        g.setColour (chlorine.withAlpha (0.9f));
+        g.setColour (chlorine.withAlpha (0.92f));
         g.strokePath (arc, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
         g.fillEllipse (juce::Rectangle<float> (3.5f, 3.5f).withCentre (polar (a1, R)));
     }
 
-    // blade needle
+    // subtle 3D machined dark-obsidian knob cap seated inside the halo
+    const float rCap = R * 0.64f;
+    if (rCap > 4.0f)
+    {
+        // 1. soft downward drop shadow grounding the 3D knob onto the glass
+        {
+            const juce::Point<float> sc { c.x + 0.6f, c.y + 2.3f };
+            juce::ColourGradient sh (voidc.withAlpha (0.82f), sc.x, sc.y, voidc.withAlpha (0.0f), sc.x + rCap * 1.26f, sc.y, true);
+            sh.addColour (0.65, voidc.withAlpha (0.48f));
+            g.setGradientFill (sh);
+            g.fillEllipse (juce::Rectangle<float> (rCap * 2.52f, rCap * 2.52f).withCentre (sc));
+        }
+
+        // 2. recessed dark bezel collar around the cap
+        const auto wellRect = juce::Rectangle<float> (rCap * 2.12f, rCap * 2.12f).withCentre (c);
+        g.setColour (voidc.withAlpha (0.88f));
+        g.fillEllipse (wellRect);
+        {
+            juce::ColourGradient wellRim (voidc.withAlpha (0.95f), c.x, wellRect.getY(),
+                                          frost.withAlpha (0.14f), c.x, wellRect.getBottom(), false);
+            g.setGradientFill (wellRim);
+            g.drawEllipse (wellRect.reduced (0.4f), 0.9f);
+        }
+
+        // 3. sculpted domed satin-obsidian body (upper-left directional lighting)
+        const auto capRect = juce::Rectangle<float> (rCap * 2.0f, rCap * 2.0f).withCentre (c);
+        {
+            const juce::Point<float> hi { c.x - rCap * 0.36f, c.y - rCap * 0.42f };
+            juce::ColourGradient dome (juce::Colour (hot ? 0xff434866 : 0xff363b54), hi.x, hi.y,
+                                       juce::Colour (0xff07080e), c.x + rCap * 0.94f, c.y + rCap * 0.94f, true);
+            dome.addColour (0.42, juce::Colour (0xff1c2030));
+            dome.addColour (0.76, juce::Colour (0xff0e1019));
+            g.setGradientFill (dome);
+            g.fillEllipse (capRect);
+        }
+
+        // 4. subtle neon-purple ambient bounce reflecting onto the lower beveled skirt
+        if (fill > 0.01f || hot)
+        {
+            juce::ColourGradient bounce (violet.withAlpha (0.0f), c.x, c.y - rCap * 0.08f,
+                                         violet.withAlpha (0.10f + 0.18f * fill + (hot ? 0.07f : 0.0f)),
+                                         c.x, c.y + rCap, false);
+            g.setGradientFill (bounce);
+            g.fillEllipse (capRect.reduced (0.7f));
+        }
+
+        // 5. machined beveled outer rim: crisp upper-left specular highlight + lower neon catchlight
+        {
+            juce::ColourGradient bevel (frost.withAlpha (hot ? 0.46f : 0.34f), c.x - rCap * 0.38f, capRect.getY(),
+                                        violet.withAlpha (0.18f + 0.26f * fill), c.x + rCap * 0.38f, capRect.getBottom(), false);
+            bevel.addColour (0.48, seamHi.withAlpha (0.42f));
+            g.setGradientFill (bevel);
+            g.drawEllipse (capRect.reduced (0.5f), 1.15f);
+        }
+
+        // 6. milled inner concave crown dish (gives unmistakable tactile 3D depth)
+        const auto dishRect = juce::Rectangle<float> (rCap * 1.44f, rCap * 1.44f).withCentre (c);
+        {
+            juce::ColourGradient dishFill (juce::Colour (0xff0e1018).withAlpha (0.55f), c.x - rCap * 0.25f, dishRect.getY(),
+                                           juce::Colour (0xff262a3d).withAlpha (0.35f), c.x + rCap * 0.25f, dishRect.getBottom(), false);
+            g.setGradientFill (dishFill);
+            g.fillEllipse (dishRect);
+
+            juce::ColourGradient dishRim (voidc.withAlpha (0.62f), c.x - rCap * 0.2f, dishRect.getY(),
+                                          frost.withAlpha (0.16f), c.x + rCap * 0.2f, dishRect.getBottom(), false);
+            g.setGradientFill (dishRim);
+            g.drawEllipse (dishRect, 0.9f);
+        }
+    }
+
+    // 3D-lifted blade needle + center diamond sigil
     {
         const float a = start + pos * (end - start);
-        const auto tip = polar (a, R * 0.97f);
-        const auto b1 = polar (a - 0.16f, R * 0.40f), b2 = polar (a + 0.16f, R * 0.40f);
+        const auto tip = polar (a, R * 0.96f);
+        const auto b1 = polar (a - 0.17f, R * 0.36f), b2 = polar (a + 0.17f, R * 0.36f);
         juce::Path blade;
         blade.addTriangle (tip, b1, b2);
-        g.setColour (frost.withAlpha (dragging ? 1.0f : 0.92f));
+
+        // soft shadow beneath blade
+        g.setColour (voidc.withAlpha (0.70f));
+        g.fillPath (blade, juce::AffineTransform::translation (0.8f, 1.3f));
+
+        // neon edge + frost blade
+        g.setColour (violet.withAlpha (dragging ? 0.65f : 0.32f));
+        g.strokePath (blade, juce::PathStrokeType (1.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+        g.setColour (dragging ? violetHi : frost.withAlpha (0.95f));
         g.fillPath (blade);
-        g.setColour (pewter.withAlpha (0.8f));
-        g.fillPath (diamond (c, 4.0f));
+
+        // center beveled diamond
+        const auto dPath = diamond (c, 4.6f);
+        g.setColour (voidc.withAlpha (0.65f));
+        g.fillPath (dPath, juce::AffineTransform::translation (0.4f, 0.8f));
+        g.setColour (dragging ? violet : (hot ? frost.withAlpha (0.9f) : pewter.withAlpha (0.85f)));
+        g.fillPath (dPath);
     }
 
     // caption + value
     drawCaps (g, s.getName(), bounds.withHeight (capH), 9.5f, hot ? frost : pewter);
-    g.setColour (dragging ? violet : frost);
+    g.setColour (dragging ? violetHi : frost);
     g.setFont (type::value (12.5f));
     g.drawText (s.getTextFromValue (s.getValue()), bounds.withTop (bounds.getBottom() - valH), juce::Justification::centred, false);
 }
@@ -278,8 +371,14 @@ void ReliquaryLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, in
         juce::Path m;
         m.startNewSubPath (glass.getX(), levelY - 1.5f);
         m.quadraticTo (glass.getCentreX(), levelY + 1.8f, glass.getRight(), levelY - 1.5f);
-        g.setColour (frost.withAlpha (0.95f));
+        g.setColour (violetHi.withAlpha (0.95f));
         g.strokePath (m, juce::PathStrokeType (1.4f));
+
+        // subtle 3D cylindrical glass highlight along left interior edge
+        juce::ColourGradient sheen (frost.withAlpha (0.18f), glass.getX() + 1.6f, glass.getY(),
+                                    frost.withAlpha (0.04f), glass.getX() + 1.6f, glass.getBottom(), false);
+        g.setGradientFill (sheen);
+        g.fillRect (juce::Rectangle<float> (glass.getX() + 1.4f, glass.getY() + 2.0f, 1.8f, glass.getHeight() - 4.0f));
     }
 
     g.setColour (frost.withAlpha (hot ? 0.38f : 0.2f));
