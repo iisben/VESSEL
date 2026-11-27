@@ -139,7 +139,13 @@ void VesselEditor::paint (juce::Graphics& g)
 void VesselEditor::timerCallback()
 {
     const auto& t = proc.telemetry;
-    backdrop.setEnergy (t.rms.load());
+    backdrop.setEnergy (t.rms.load (std::memory_order_relaxed));
+    backdrop.setPerformanceState (t.keyPulseSeq.load (std::memory_order_acquire),
+                                  t.keyPulseVel.load (std::memory_order_relaxed),
+                                  t.keyNoteNorm.load (std::memory_order_relaxed),
+                                  t.keyHold.load (std::memory_order_relaxed),
+                                  t.heldCount.load (std::memory_order_relaxed),
+                                  t.polyTouch.load (std::memory_order_relaxed));
 
     const bool alive = backdrop.isAlive();
     if (alive != glWasAlive) { glWasAlive = alive; setOpaque (! alive); repaint(); }
