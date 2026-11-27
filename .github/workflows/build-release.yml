@@ -68,15 +68,20 @@ jobs:
           ./build/Vessel2QA_artefacts/Release/Vessel2QA --strict --stage4-qa --ci-vm
           ./build/Vessel2PresetQA_artefacts/Release/Vessel2PresetQA --no-wav
 
-      - name: Download & Run pluginval (Strictness Level 5 — VST3 & AU)
+      - name: Download & Run pluginval (Strictness Level 5 — VST3 & AU) + auval
         run: |
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          ditto build/Vessel_artefacts/Release/AU/VESSEL.component "$HOME/Library/Audio/Plug-Ins/Components/VESSEL.component"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 2
+          auval -v aumu Vssl Vsla
           curl -fSL "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_macOS.zip" -o pluginval.zip
           unzip -q pluginval.zip -d pluginval_bin
           PVAL="pluginval_bin/pluginval.app/Contents/MacOS/pluginval"
           "$PVAL" --strictness-level 5 --validate-in-process --timeout-ms 120000 \
             --validate build/Vessel_artefacts/Release/VST3/VESSEL.vst3
           "$PVAL" --strictness-level 5 --validate-in-process --timeout-ms 120000 \
-            --validate build/Vessel_artefacts/Release/AU/VESSEL.component
+            --validate "$HOME/Library/Audio/Plug-Ins/Components/VESSEL.component"
 
       - name: Package macOS Universal Archives (VST3, AU, All-in-One)
         run: |
