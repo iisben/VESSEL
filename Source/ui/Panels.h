@@ -2,24 +2,22 @@
 
 #include "Controls.h"
 #include "../Parameters.h"
-#include "../Presets.h"
 #include <functional>
-#include <vector>
 
 class VesselProcessor;
 
 namespace vessel::ui
 {
-/** Every parameter-bound slider registers here so the editor can paint live modulation and MIDI Learn states. */
+/** Every parameter-bound slider registers here so the editor can paint live modulation onto it. */
 struct Registry
 {
     std::vector<ParamSlider*> sliders;
-    std::vector<juce::Component*> live;
+    std::vector<juce::Component*> live;   // components with telemetry to repaint each frame
 };
 
 //==============================================================================
-/** A machined vertical module column: hardware LED header + index, rows of controls,
-    and an optional recessed instrument display at the bottom. */
+/** A vertical rank: rune header (or plain title) + feature number, rows of controls,
+    and an optional "instrument" area at the bottom that visualises the module's state. */
 class ModuleColumn : public juce::Component
 {
 public:
@@ -31,6 +29,8 @@ public:
     Selector& selector (int pid, const juce::String& caption = {});
     juce::TextButton& button (const juce::String& text);
 
+    /** Adds the most recently created N components as one row (laid out left to right, equal widths, or in
+        proportion to `weights` when given). */
     void row (std::initializer_list<juce::Component*>, int height, std::initializer_list<float> weights = {});
 
     std::function<void (juce::Graphics&, juce::Rectangle<float>)> instrument;
@@ -68,7 +68,7 @@ private:
 };
 
 //==============================================================================
-/** Left signal spine: the five synthesis stages as machined tabs + the Voice & Expression block. */
+/** Left rail: the five stages as a signal column, plus the voice block. */
 class Spine : public juce::Component
 {
 public:
@@ -82,7 +82,7 @@ public:
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override { hover = -1; repaint(); }
 
-    static constexpr int kStageH = 50, kTop = 8;
+    static constexpr int kStageH = 64, kTop = 14;
 
 private:
     int stageAt (juce::Point<int>) const;
@@ -92,73 +92,59 @@ private:
 };
 
 //==============================================================================
-/** Top Command Bar:
-    - VESSEL II wordmark & emblem
-    - Preset Bar (Prev/Next, Name/Category/Favorite/Browser trigger, Save, Init)
-    - A/B Compare + Copy A->B, Undo/Redo, MPE Indicator/Toggle
-    - Zoom Selector (75% / 100% / 125% / 150%)
-    - Stereo Output Peak/LUFS-style Meter + Sub-120 Hz Mono-Correlation Indicator */
 class Header : public juce::Component
 {
 public:
     explicit Header (VesselProcessor&);
-
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
-    void mouseMove (const juce::MouseEvent&) override;
-    void mouseExit (const juce::MouseEvent&) override;
-    void refresh (float lufsMomentary, float sub120Corr, bool subHasSignal);
 
-    std::function<void()> onBrowse;
-    std::function<void()> onSave;
-    std::function<void()> onInit;
-    std::function<void()> onTorch;
-    std::function<void (float)> onZoom;
-
+    std::function<void()> onBrowse;   // the preset name was clicked
+    std::function<void()> onTorch;    // the Lights Out button was clicked
+    /** The Lights Out button, top right (header coordinates). */
+    juce::Rectangle<int> lightsArea() const { return { getWidth() - 132, getHeight() / 2 - 14, 114, 28 }; }
     void setBrowserOpen (bool o) { browserOpen = o; repaint(); }
-    void setZoomPercent (int pct);
-    juce::Rectangle<int> lightsArea() const { return { 0, 0, 0, 0 }; }
 
 private:
-    void stepPreset (int delta);
-    juce::Rectangle<int> presetBarArea() const;
-    juce::Rectangle<int> presetClickArea() const;
-    juce::Rectangle<int> favStarArea() const;
-    juce::Rectangle<float> meterArea() const;
-    juce::Rectangle<float> corrArea() const;
-
-    VesselProcessor& proc;
     bool browserOpen = false;
-    bool hoverPreset = false, hoverStar = false;
-    int activeZoomPct = 100;
-    int lastAbVer = -1;
-
-    float peakHoldL = 0.0f, peakHoldR = 0.0f;
-    float dispPeakL = 0.0f, dispPeakR = 0.0f;
-    float clipFlash = 0.0f;
-    float curLufs = -70.0f;
-    float curSubCorr = 1.0f;
-    bool curSubActive = false;
-
-    juce::TextButton prevBtn { "<" }, nextBtn { ">" };
-    juce::TextButton saveBtn { "SAVE" }, initBtn { "INIT" };
-    juce::TextButton abBtnA { "A" }, abBtnB { "B" }, abCopyBtn { "A>B" };
-    juce::TextButton undoBtn { "UNDO" }, redoBtn { "REDO" };
-    juce::TextButton mpeBtn { "MPE" };
-    std::array<juce::TextButton, 4> zoomBtns;
-    std::unique_ptr<juce::ButtonParameterAttachment> mpeAttach;
+    juce::Rectangle<int> presetArea() const;
+    VesselProcessor& proc;
+    juce::TextButton prev { "<" }, next { ">" };
 };
 
 //==============================================================================
-/** Modulation Matrix Deck (below the active stage):
-    6 vertical tabs: LFO 1, LFO 2, LFO 3, EXPR (Vel/MW/AT/Slide/Breath), MACRO (1..8), XY (X/Y routes). */
+/** Right rail: the vessel meter + phase scope, then clipper, exciter and mono collapse. */
+class MasterRail : public juce::Component
+{
+public:
+    MasterRail (VesselProcessor&, Registry&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void refresh();
+
+private:
+    void paintMeter (juce::Graphics&, juce::Rectangle<float>);
+    void paintScope (juce::Graphics&, juce::Rectangle<float>);
+    void paintTelemetry (juce::Graphics&, juce::Rectangle<float>);
+
+    VesselProcessor& proc;
+    std::unique_ptr<ModuleColumn> clip, exciter, mono;
+    juce::Rectangle<float> meterArea, scopeArea, telemetryArea;
+    float clipFlash = 0.0f;
+    int lastClipCount = 0;
+};
+
+//==============================================================================
+/** Bottom: the modulation deck. The first tab is MACROS (eight named knobs, six routes each), then the three
+    warped LFOs (motion controls, shape canvas, four routes each), then EXPRESSION (velocity, mod wheel and
+    aftertouch, two routes each).
+    Mapping: drag an LFO tab, a macro's diamond or an expression header onto any control, or right-click the control. */
 class ModPanel : public juce::Component
 {
 public:
     ModPanel (VesselProcessor&, Registry&);
     ~ModPanel() override;
-
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -166,14 +152,15 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
-    void select (int page);   // 0..2 LFO, 3 Expr, 4 Macro, 5 XY
+    void select (int page);   // 0..2 LFO, 3 expression, 4 macros
     void selectMacro (int m);
     void refresh();
 
+    /** Brings the source's page forward, points at the route and says what happened. */
     void showRoute (ModSource, int slot, routing::Result, int targetPid);
     void showMessage (const juce::String&);
 
-    static constexpr int kExprPage = 3, kMacroPage = 4, kXyPage = 5, kPages = 6;
+    static constexpr int kExprPage = 3, kMacroPage = 4, kPages = 5;
 
 private:
     struct LfoPage
@@ -187,51 +174,44 @@ private:
     };
     struct ExprPage
     {
-        // 0=Vel, 1=MW, 2=AT, 3=Slide(CC74), 4=Breath(CC2)
-        std::array<std::array<Selector*, 2>, 5> dest {};
-        std::array<std::array<ParamSlider*, 2>, 5> amt {};
+        std::array<std::array<Selector*, 2>, 3> dest {};
+        std::array<std::array<ParamSlider*, 2>, 3> amt {};
         ParamSlider* velAmp = nullptr;
         std::vector<juce::Component*> all;
     };
+
     struct MacroPage
     {
         std::array<ParamSlider*, kNumMacros> knob {};
         std::array<std::array<Selector*, kMacroSlots>, kNumMacros> dest {};
         std::array<std::array<ParamSlider*, kMacroSlots>, kNumMacros> amt {};
     };
-    struct XyPage
-    {
-        std::array<std::array<Selector*, kXySlots>, 2> dest {};
-        std::array<std::array<ParamSlider*, kXySlots>, 2> amt {};
-        std::vector<juce::Component*> all;
-    };
 
     void drawAt (juce::Point<float>, bool interpolateFromLast);
+    void paintMacros (juce::Graphics&);
+    juce::Rectangle<float> macroHead (int m) const;
+    void beginRename (int m);
+    static int pageAtTab (int tab) noexcept { return tab == 0 ? kMacroPage : tab - 1; }
+    static int tabOfPage (int page) noexcept { return page == kMacroPage ? 0 : page + 1; }
     void paintTabs (juce::Graphics&);
     void paintLfo (juce::Graphics&);
     void paintExpr (juce::Graphics&);
-    void paintMacros (juce::Graphics&);
-    void paintXy (juce::Graphics&);
-    void beginRename (int m);
-    static int pageAtTab (int tab) noexcept { return tab; }
-    static int tabOfPage (int page) noexcept { return page; }
     juce::Rectangle<float> tabRect (int i) const;
-    juce::Rectangle<float> macroChip (int m) const;
     juce::Rectangle<float> exprHead (int src) const;
     juce::Rectangle<float> routeRow (int page, int slot) const;
+    /** The drag source under p: an LFO tab or an expression header. */
     bool sourceAt (juce::Point<float>, ModSource&) const;
     static void setIdle (ParamSlider*, bool);
 
     VesselProcessor& proc;
-    int current = kMacroPage;
+    int current = 0;
     juce::OwnedArray<juce::Component> owned;
     std::array<LfoPage, kNumLfos> lfo;
     ExprPage expr;
     MacroPage mac;
-    XyPage xy;
     int macroSel = 0, namesSeen = -1;
     std::unique_ptr<juce::TextEditor> rename;
-    juce::TextButton scatter { "SCATTER" };
+    juce::TextButton scatter { "Scatter" };
     juce::Rectangle<float> canvas, tabs;
     juce::Point<float> lastDraw, pressAt;
     bool drawing = false, dragArmed = false;
@@ -243,13 +223,14 @@ private:
 };
 
 //==============================================================================
-/** Searchable, Categorized, Tagged & Favorites-Enabled V2 Preset Browser Overlay. */
+/** The preset browser: drops down from the header's preset name over the stage, in the Reliquary style.
+    Categories (with counts) on the left, the category's presets as a grid of names with their character
+    tags, and an info strip for the preset under the mouse (or the current one).
+    Click loads and closes · arrow keys audition · page up / down change category · esc or a click outside closes. */
 class PresetBrowser : public juce::Component
 {
 public:
     explicit PresetBrowser (VesselProcessor&);
-    ~PresetBrowser() override;
-
     std::function<void()> onClose, onLoaded;
 
     void open();
@@ -258,58 +239,19 @@ public:
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override;
     void mouseDown (const juce::MouseEvent&) override;
-    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
     bool keyPressed (const juce::KeyPress&) override;
 
-    void setSearchQuery (const juce::String& q);
-    void setFavoritesOnly (bool fav);
-
 private:
-    void rebuildCategories();
-    void rebuildItems();
-    void load (int combinedIndex, bool close);
-    int currentCombinedIndex() const;
-    juce::Rectangle<float> starRectForItem (const juce::Rectangle<float>& itemRect) const;
+    void setCategory (int);
+    void load (int presetIndex, bool close);
+    std::vector<int> itemsOf (int cat) const;
 
     VesselProcessor& proc;
-    juce::TextEditor searchBox;
-    juce::TextButton favBtn { "FAVORITES" };
-    juce::TextButton clearBtn { "CLEAR" };
-    juce::TextButton closeBtn { "CLOSE" };
-
-    juce::StringArray cats;   // index 0 = "All"
-    juce::String selectedCat { "All" };
-    bool favoritesOnly = false;
-
-    juce::Rectangle<float> panel, listArea, gridArea, infoArea;
+    juce::StringArray cats;
+    juce::Rectangle<float> panel, list, grid, info;
     std::vector<juce::Rectangle<float>> catRects, itemRects;
-    std::vector<int> items;   // indices into proc.presetManager.allPresets()
-    int hoverItem = -1, hoverCat = -1, hoverStar = -1;
-    int cols = 3;
-    float scrollY = 0.0f, maxScrollY = 0.0f;
-};
-
-//==============================================================================
-/** Compact brutalist inline overlay for saving a version="2" User Preset. */
-class SavePresetOverlay : public juce::Component
-{
-public:
-    explicit SavePresetOverlay (VesselProcessor&);
-    std::function<void (bool saved)> onFinished;
-
-    void open();
-    void paint (juce::Graphics&) override;
-    void resized() override;
-    void mouseDown (const juce::MouseEvent&) override;
-    bool keyPressed (const juce::KeyPress&) override;
-
-private:
-    void commitSave();
-
-    VesselProcessor& proc;
-    juce::Rectangle<float> dialog;
-    juce::TextEditor nameEd, catEd, tagsEd, descEd;
-    juce::TextButton saveBtn { "SAVE PRESET" }, cancelBtn { "CANCEL" };
+    std::vector<int> items;
+    int cat = 0, hoverItem = -1, hoverCat = -1, cols = 3;
 };
 
 /** Builds stage page 0..4 (Source, Ruin, Shape, Space, Pressure). */
