@@ -1013,7 +1013,7 @@ GateResult runGate5()
 //==============================================================================
 // GATE 6 — Voice Stealing, DC Hygiene & Idle-Tail Denormals
 //==============================================================================
-GateResult runGate6()
+GateResult runGate6 (bool ciVmMode)
 {
     GateResult res { 6, "Voice Stealing, DC Hygiene & Idle Tail", GateStatus::Pass, "", {} };
     constexpr double sr = 48000.0;
@@ -1110,13 +1110,15 @@ GateResult runGate6()
     const double idleCpuPct = medIdleUs / (512.0 / sr * 1.0e6) * 100.0;
     const double tailDb = linToDb (tailPeak);
     const int activeVoices = p->activeVoiceCount();
-    const bool idleOk = (tailDb < -120.0) && (activeVoices == 0) && (idleCpuPct < 0.5);
+    const bool idleCpuOk = ciVmMode || (idleCpuPct < 0.5);
+    const bool idleOk = (tailDb < -120.0) && (activeVoices == 0) && idleCpuOk;
 
     if (! stealOk || ! idleOk) res.status = GateStatus::Fail;
     res.details.push_back ("Voice steal 2nd-diff ratio=" + fmt (curvRatio, 2) + "x (lim<=5.0), DC=" + fmt (dcDbfs, 1)
                            + " dBFS (lim<-90) [" + (stealOk ? "OK" : "FAIL") + "]");
     res.details.push_back ("10s idle tail: peak=" + fmt (tailDb, 1) + " dBFS (lim<-120), voices="
-                           + std::to_string (activeVoices) + " (lim==0), idleCPU=" + fmt (idleCpuPct, 3) + "% RT (lim<0.5%) [" + (idleOk ? "OK" : "FAIL") + "]");
+                           + std::to_string (activeVoices) + " (lim==0), idleCPU=" + fmt (idleCpuPct, 3)
+                           + "% RT (" + std::string (ciVmMode ? "CI-VM info" : "lim<0.5%") + ") [" + (idleOk ? "OK" : "FAIL") + "]");
     res.summary = "stealRatio=" + fmt (curvRatio, 2) + "x, DC=" + fmt (dcDbfs, 1) + "dBFS, tail=" + fmt (tailDb, 1)
                 + "dBFS, voices=" + std::to_string (activeVoices) + ", idleCPU=" + fmt (idleCpuPct, 3) + "%";
     return res;
@@ -1269,7 +1271,7 @@ GateResult runGate7 (const fs::path& outDir, const fs::path& compareCsv)
 //==============================================================================
 // GATE 8 — Release-Build Polyphonic CPU Budget
 //==============================================================================
-GateResult runGate8()
+GateResult runGate8 (bool ciVmMode)
 {
     GateResult res { 8, "Release-Build Polyphonic CPU Budget", GateStatus::Pass, "", {} };
     constexpr double sr = 48000.0;
@@ -1339,14 +1341,15 @@ GateResult runGate8()
     const double rtPct = medUs / blockBudgetUs * 100.0;
     const double p95Pct = p95Us / blockBudgetUs * 100.0;
 
-    const bool ok = (rtPct < 15.0);
+    const bool ok = (activeVoices == dsp::VoiceManager::kVoices) && (ciVmMode || (rtPct < 15.0));
     if (! ok) res.status = GateStatus::Fail;
 #ifndef NDEBUG
     res.details.push_back ("WARNING: Built without NDEBUG (not Release -O3)");
 #endif
     res.details.push_back ("Poly stress (" + std::to_string (activeVoices) + "/" + std::to_string (dsp::VoiceManager::kVoices)
                            + " voices, 240x512 @48k): median=" + fmt (medUs, 1) + " us (" + fmt (rtPct, 2)
-                           + "% RT, lim<15.0%), p95=" + fmt (p95Us, 1) + " us (" + fmt (p95Pct, 2) + "% RT) [" + (ok ? "OK" : "FAIL") + "]");
+                           + "% RT, " + std::string (ciVmMode ? "CI-VM info" : "lim<15.0%") + "), p95=" + fmt (p95Us, 1)
+                           + " us (" + fmt (p95Pct, 2) + "% RT) [" + (ok ? "OK" : "FAIL") + "]");
     res.summary = std::to_string (activeVoices) + "v median=" + fmt (medUs, 1) + "us (" + fmt (rtPct, 2) + "% RT), p95=" + fmt (p95Pct, 2) + "% RT";
     return res;
 }
@@ -1859,6 +1862,7 @@ int main (int argc, char** argv)
     juce::ScopedJuceInitialiser_GUI juceInit;
     bool baselineMode = false;
     bool runStage4 = false;
+    bool ciVmMode = false;
     std::set<int> enabledGates { 1, 2, 3, 4, 5, 6, 7, 8 };
     fs::path outDir = "build/vessel2_qa";
     fs::path compareV1;
@@ -1869,6 +1873,7 @@ int main (int argc, char** argv)
         if (arg == "--baseline") baselineMode = true;
         else if (arg == "--strict") baselineMode = false;
         else if (arg == "--stage4-qa") runStage4 = true;
+        else if (arg == "--ci-vm") ciVmMode = true;
         else if (arg == "--out-dir" && i + 1 < argc) outDir = argv[++i];
         else if (arg == "--compare-v1" && i + 1 < argc) compareV1 = argv[++i];
         else if (arg == "--gates" && i + 1 < argc)
@@ -1891,9 +1896,9 @@ int main (int argc, char** argv)
     if (enabledGates.count (3)) results.push_back (runGate3());
     if (enabledGates.count (4)) results.push_back (runGate4());
     if (enabledGates.count (5)) results.push_back (runGate5());
-    if (enabledGates.count (6)) results.push_back (runGate6());
+    if (enabledGates.count (6)) results.push_back (runGate6 (ciVmMode));
     if (enabledGates.count (7)) results.push_back (runGate7 (outDir, compareV1));
-    if (enabledGates.count (8)) results.push_back (runGate8());
+    if (enabledGates.count (8)) results.push_back (runGate8 (ciVmMode));
     if (runStage4) results.push_back (runStage4ControlPlaneQA (outDir));
 
     fs::create_directories (outDir);

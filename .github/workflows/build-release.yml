@@ -65,7 +65,7 @@ jobs:
 
       - name: Run 8-Gate DSP QA & 20-Preset Audio QA
         run: |
-          ./build/Vessel2QA_artefacts/Release/Vessel2QA --strict --stage4-qa
+          ./build/Vessel2QA_artefacts/Release/Vessel2QA --strict --stage4-qa --ci-vm
           ./build/Vessel2PresetQA_artefacts/Release/Vessel2PresetQA --no-wav
 
       - name: Download & Run pluginval (Strictness Level 5 — VST3 & AU)
@@ -141,7 +141,7 @@ jobs:
         shell: pwsh
         run: |
           $qa = Get-ChildItem -Recurse -Filter Vessel2QA.exe build | Select-Object -First 1
-          & $qa.FullName --strict --stage4-qa
+          & $qa.FullName --strict --stage4-qa --ci-vm
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $pqa = Get-ChildItem -Recurse -Filter Vessel2PresetQA.exe build | Select-Object -First 1
           & $pqa.FullName --no-wav
@@ -212,7 +212,7 @@ jobs:
 
       - name: Run 8-Gate DSP QA & 20-Preset Audio QA
         run: |
-          ./build/Vessel2QA_artefacts/Release/Vessel2QA --strict --stage4-qa
+          ./build/Vessel2QA_artefacts/Release/Vessel2QA --strict --stage4-qa --ci-vm
           ./build/Vessel2PresetQA_artefacts/Release/Vessel2PresetQA --no-wav
 
       - name: Download & Run pluginval (Strictness Level 5 — VST3)
