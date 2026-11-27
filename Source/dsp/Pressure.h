@@ -325,12 +325,10 @@ private:
 };
 
 //==============================================================================
-/** Output stage, 4x oversampled: (24) harmonic exciter → output gain → (25) brickwall clipper.
-    The exciter's harmonics and the clipper's corners are generated at 4x, where they have room to fall away
-    before the decimator, instead of folding back into the audio band. The exciter is a parallel add, so it
-    lives inside the oversampled domain with the dry signal it rides on.
-    The half-band decimator rings slightly on a clipped edge, so after decimation the true-peak ceiling holds the
-    reconstructed waveform under the ceiling, and a sample-exact clamp stays behind it as a backstop. */
+/** Output stage, 4x Type-I linear-phase FIR oversampled:
+    (24) 64-bit ADAA1 harmonic exciter -> output gain -> (25) 64-bit ADAA2 brickwall clipper -> 16x true-peak ceiling.
+    Exact integer linear-phase latency when active (0-sample PDC error) and true 0-latency bypass when both exciter
+    and clipper are off at prepareToPlay. */
 class OutputStage
 {
 public:
@@ -339,20 +337,41 @@ public:
     void prepare (float sampleRate, int maxBlock)
     {
         osr = 4.0f * sampleRate;
-        os = std::make_unique<juce::dsp::Oversampling<float>> (2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
-        os->initProcessing ((size_t) maxBlock);
-        os->reset();
+        os.prepare (maxBlock);
+        const int q = (int) std::llround (((double) os.getLatencyInSamples() + 0.25) * 4.0);
+        pad4x = (4 - (q & 3)) & 3;
         pre[0].reset(); pre[1].reset();
         post[0].reset(); post[1].reset();
         gainR.reset(); ceilR.reset(); amtR.reset();
         clipped = 0;
         excFade.prepare (osr); clipFade.prepare (osr);
         tp.prepare (sampleRate);
+        resetAdaa();
+        osActive = true;
+        tpActive = true;
     }
 
-    /** Oversampler group delay plus the true-peak look-ahead. Constant whether the clipper is on or off. */
-    float latency() const { return (os ? os->getLatencyInSamples() : 0.0f) + (float) tp.latency(); }
-    void snap (bool excOn, bool clipOn) { excFade.snap (excOn); clipFade.snap (clipOn); }
+    /** Exact linear-phase integer latency in base-rate samples (0 when bypassed). */
+    float latency() const
+    {
+        float lat = 0.0f;
+        if (osActive) lat += os.getLatencyInSamples() + (float) (1 + pad4x) * 0.25f;
+        if (tpActive) lat += (float) tp.latency();
+        return lat;
+    }
+
+    void snap (bool excOn, bool clipOn)
+    {
+        excFade.snap (excOn);
+        clipFade.snap (clipOn);
+        osActive = excOn || clipOn;
+        tpActive = clipOn;
+        os.reset();
+        tp.reset();
+        pre[0].reset(); pre[1].reset();
+        post[0].reset(); post[1].reset();
+        resetAdaa();
+    }
 
     int clipped = 0;
     /** Lab A/B only: false leaves the true-peak stage as a pure delay. */
@@ -361,19 +380,42 @@ public:
 
     void process (float* l, float* r, int n, const Params& p)
     {
-        float* chans[2] { l, r };
-        juce::dsp::AudioBlock<float> block (chans, 2, (size_t) n);
-        auto up = os->processSamplesUp (block);
-        const int m = (int) up.getNumSamples();
-        float* ul = up.getChannelPointer (0);
-        float* ur = up.getChannelPointer (1);
+        if (! osActive && ! p.excOn && ! p.clipOn)
+        {
+            // True 0-latency 1x bypass path (ramped output gain only)
+            gainR.to (dbToGain (p.gainDb), n);
+            for (int i = 0; i < n; ++i)
+            {
+                const float g = gainR.next();
+                l[i] *= g; r[i] *= g;
+            }
+            return;
+        }
+        if (! osActive)
+        {
+            osActive = true;
+            os.reset();
+            pre[0].reset(); pre[1].reset();
+            post[0].reset(); post[1].reset();
+            resetAdaa();
+        }
+        if (p.clipOn && ! tpActive)
+        {
+            tpActive = true;
+            tp.reset();
+        }
+
+        os.processUp (l, r, n);
+        const int m = n * 4;
+        float* ul = os.upL();
+        float* ur = os.upR();
 
         gainR.to (dbToGain (p.gainDb), m);
         ceilR.to (dbToGain (p.ceilingDb), m);
-        const float k = 1.0f + p.excHarm * 9.0f;
-        amtR.to (p.excAmount * 1.4f / std::sqrt (k), m);
+        const double k = 1.0 + (double) p.excHarm * 9.0;
+        amtR.to (p.excAmount * 1.4f / std::sqrt ((float) k), m);
         const bool excLive = p.excOn || ! excFade.settled (p.excOn);
-        if (excLive) for (int c = 0; c < 2; ++c) { pre[c].setup (p.excFreq, 0.7f, osr); post[c].setup (p.excFreq, 0.7f, osr); }
+        if (excLive) for (int c = 0; c < 2; ++c) { pre[c].setup (p.excFreq, 0.7, osr); post[c].setup (p.excFreq, 0.7, osr); }
         const bool clipLive = p.clipOn || ! clipFade.settled (p.clipOn);
         int hits = 0;
 
@@ -386,29 +428,49 @@ public:
                 const float eg = excFade.next (p.excOn) * amt;
                 for (int c = 0; c < 2; ++c)
                 {
-                    const float h = pre[c].highpass (x[c]);
-                    const float t = fastTanh (k * h);
-                    const float e = t + 0.6f * t * t;   // odd + even products, smooth (no |x| corner)
-                    x[c] += post[c].highpass (e) * eg;
+                    const double u = k * (double) pre[c].highpass (x[c]);
+                    const double e = adaa1Exciter (c, u);
+                    x[c] += post[c].highpass ((float) e) * eg;
                 }
             }
-            const float g = gainR.next(), c = ceilR.next();
+            const float g = gainR.next(), c = std::max (1.0e-5f, ceilR.next());
             x[0] *= g; x[1] *= g;
+
+            // Phase-aligned 1-oversampled-sample dry delay matching ADAA2 clipper's triangular kernel center
+            const float dry0 = clipDry[0]; clipDry[0] = x[0];
+            const float dry1 = clipDry[1]; clipDry[1] = x[1];
+
             if (clipLive)
             {
                 const float cg = clipFade.next (p.clipOn);
-                for (auto& v : x)
+                const double invC = 1.0 / (double) c;
+                const float dry[2] { dry0, dry1 };
+                for (int ch = 0; ch < 2; ++ch)
                 {
-                    if (std::abs (v) > c) ++hits;
-                    v += cg * (std::clamp (v, -c, c) - v);
+                    if (std::abs (x[ch]) > c) ++hits;
+                    const double yc = adaa2Clip (ch, (double) x[ch] * invC) * (double) c;
+                    x[ch] = dry[ch] + cg * ((float) yc - dry[ch]);
                 }
             }
+            else
+            {
+                x[0] = dry0; x[1] = dry1;
+            }
+
+            if (pad4x > 0)
+            {
+                const float pl = padBuf[0][padIdx]; padBuf[0][padIdx] = x[0]; x[0] = pl;
+                const float pr = padBuf[1][padIdx]; padBuf[1][padIdx] = x[1]; x[1] = pr;
+                if (++padIdx >= pad4x) padIdx = 0;
+            }
+
             ul[i] = x[0]; ur[i] = x[1];
         }
-        os->processSamplesDown (block);
+        os.processDown (l, r, n);
 
         // inter-sample peaks left by the decimation; then the sample clamp, which is now only a backstop
-        tp.process (l, r, n, p.clipOn && truePeak ? ceilR.cur : 0.0f);
+        if (tpActive)
+            tp.process (l, r, n, p.clipOn && truePeak ? ceilR.cur : 0.0f);
         if (p.clipOn)
         {
             const float c = ceilR.cur;
@@ -418,10 +480,75 @@ public:
     }
 
 private:
+    static double excF0 (double u) noexcept { const double t = fastTanhD (u); return t + 0.6 * t * t; }
+    static double excF1 (double u) noexcept { return tanhF1 (u) + 0.6 * (u - fastTanhD (u)); }
+
+    double adaa1Exciter (int c, double u) noexcept
+    {
+        const double f1 = excF1 (u);
+        const double du = u - excX1[c];
+        const double y = std::abs (du) > 1.0e-5 ? (f1 - excF1Prev[c]) / du
+                                                : excF0 (0.5 * (u + excX1[c]));
+        excX1[c] = u;
+        excF1Prev[c] = f1;
+        return y;
+    }
+
+    static double clipF0 (double u) noexcept { return std::clamp (u, -1.0, 1.0); }
+    static double clipF1 (double u) noexcept
+    {
+        if (u < -1.0) return -u - 0.5;
+        if (u >  1.0) return  u - 0.5;
+        return 0.5 * u * u;
+    }
+    static double clipF2 (double u) noexcept
+    {
+        if (u < -1.0) return -0.5 * u * u - 0.5 * u - (1.0 / 6.0);
+        if (u >  1.0) return  0.5 * u * u - 0.5 * u + (1.0 / 6.0);
+        return (1.0 / 6.0) * u * u * u;
+    }
+    static double clipHalf (double a, double c, double fa2, double fc2, double fc1) noexcept
+    {
+        const double d = a - c;
+        if (std::abs (d) > 1.0e-4)
+            return (fa2 - fc2 - d * fc1) / (d * d);
+        return 0.5 * clipF0 ((a + 2.0 * c) * (1.0 / 3.0));
+    }
+
+    double adaa2Clip (int ch, double u0) noexcept
+    {
+        const double u1 = clipX1[ch], u2 = clipX2[ch];
+        const double f2_0 = clipF2 (u0);
+        const double f1_1 = clipF1 (u1);
+        const double f2_1 = clipF2 (u1);
+        const double f2_2 = clipF2 (u2);
+        const double y = clipHalf (u0, u1, f2_0, f2_1, f1_1)
+                       + clipHalf (u2, u1, f2_2, f2_1, f1_1);
+        clipX2[ch] = u1;
+        clipX1[ch] = u0;
+        return y;
+    }
+
+    void resetAdaa() noexcept
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            excX1[c] = excF1Prev[c] = 0.0;
+            clipX1[c] = clipX2[c] = 0.0;
+            clipDry[c] = 0.0f;
+            for (int k = 0; k < 4; ++k) padBuf[c][k] = 0.0f;
+        }
+        padIdx = 0;
+    }
+
     float osr = 192000.0f;
-    std::unique_ptr<juce::dsp::Oversampling<float>> os;
+    LinearPhase4xOs os;
     Svf pre[2], post[2];
     BypassFade excFade, clipFade;
     Ramp gainR, ceilR, amtR;
+    double excX1[2] {}, excF1Prev[2] {}, clipX1[2] {}, clipX2[2] {};
+    float clipDry[2] {}, padBuf[2][4] {};
+    int pad4x = 0, padIdx = 0;
+    bool osActive = true, tpActive = true;
 };
 } // namespace vessel::dsp

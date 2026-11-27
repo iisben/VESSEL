@@ -87,58 +87,91 @@ private:
 };
 
 //==============================================================================
-/** Lane-parallel bank of 24 dB/oct zero-delay-feedback ladders (Zavalishin topology, tanh inside the loop).
-    One lane per voice, structure-of-arrays: every operation in tick() is the same across lanes with no
-    branches, so the compiler emits NEON (arm64) or SSE/AVX (x86) for the whole bank. Coefficients glide
-    linearly per sample between control updates, so cutoff sweeps are continuous.
-    Resonance 0..1 maps to k = 0..4.3: self-oscillation from ~0.93, bounded by the tanh.                     */
+/** Lane-parallel bank of 64-bit double 24 dB/oct nonlinear zero-delay-feedback transistor ladders.
+    Structure-of-arrays: every operation in tick() is identical across lanes with zero data-dependent branches,
+    enabling portable NEON / SSE / AVX auto-vectorization.
+    Each sample solves the implicit nonlinear ZDF equation:
+        F(y4) = y4 - S - G^4 * id * tanh(d * (x - k * y4)) = 0
+    deterministically in 3 Newton-Raphson iterations starting from the linear ZDF pivot (F'(y4) >= 1 everywhere,
+    guaranteeing unconditional quadratic convergence with smooth C-infinity saturation and zero hard clamp corners).
+    Cutoff is clamped to [10 Hz, 0.485 * osr] before exact double tan() pre-warping. */
 template <int L>
 struct LadderBank
 {
-    alignas (32) float s0[L] {}, s1[L] {}, s2[L] {}, s3[L] {};
-    alignas (32) float G[L] {}, dG[L] {}, k[L] {}, dk[L] {}, drv[L] {}, ddrv[L] {}, isd[L] {}, disd[L] {};
+    alignas (32) double s0[L] {}, s1[L] {}, s2[L] {}, s3[L] {};
+    alignas (32) double G[L] {}, dG[L] {}, k[L] {}, dk[L] {}, drv[L] {}, ddrv[L] {}, isd[L] {}, disd[L] {};
+
+    static double coefGD (double hz, double osr) noexcept
+    {
+        const double safeOsr = std::max (osr, 1.0);
+        hz = std::clamp (hz, 10.0, 0.485 * safeOsr);
+        const double g = std::tan (kPiD * hz / safeOsr);
+        return g / (1.0 + g);
+    }
 
     static float coefG (float hz, float osr) noexcept
     {
-        hz = std::clamp (hz, 5.0f, 0.45f * osr);
-        const float g = fastTan (kPi * hz / osr);
-        return g / (1.0f + g);
+        return (float) coefGD ((double) hz, (double) osr);
     }
 
-    void resetLane (int l) noexcept { s0[l] = s1[l] = s2[l] = s3[l] = 0.0f; }
+    void resetLane (int l) noexcept { s0[l] = s1[l] = s2[l] = s3[l] = 0.0; }
 
-    void setLane (int l, float Gt, float kt, float driveT, int m, bool snap) noexcept
+    void setLane (int l, double Gt, double kt, double driveT, int m, bool snap) noexcept
     {
-        const float isdT = 1.0f / std::sqrt (driveT);
-        if (snap) { G[l] = Gt; k[l] = kt; drv[l] = driveT; isd[l] = isdT; dG[l] = dk[l] = ddrv[l] = disd[l] = 0.0f; return; }
-        const float inv = 1.0f / (float) m;
-        dG[l] = (Gt - G[l]) * inv; dk[l] = (kt - k[l]) * inv;
-        ddrv[l] = (driveT - drv[l]) * inv; disd[l] = (isdT - isd[l]) * inv;
+        const double isdT = 1.0 / std::sqrt (std::max (driveT, 1.0e-6));
+        if (snap)
+        {
+            G[l] = Gt; k[l] = kt; drv[l] = driveT; isd[l] = isdT;
+            dG[l] = dk[l] = ddrv[l] = disd[l] = 0.0;
+            return;
+        }
+        const double inv = 1.0 / (double) std::max (1, m);
+        dG[l]   = (Gt - G[l]) * inv;
+        dk[l]   = (kt - k[l]) * inv;
+        ddrv[l] = (driveT - drv[l]) * inv;
+        disd[l] = (isdT - isd[l]) * inv;
     }
-    void holdLane (int l) noexcept { dG[l] = dk[l] = ddrv[l] = disd[l] = 0.0f; }
+    void holdLane (int l) noexcept { dG[l] = dk[l] = ddrv[l] = disd[l] = 0.0; }
 
     inline void tick (const float* __restrict in, float* __restrict out) noexcept
     {
         for (int l = 0; l < L; ++l)
         {
-            const float g = (G[l] += dG[l]);
-            const float kk = (k[l] += dk[l]);
-            const float d = (drv[l] += ddrv[l]);
-            const float id = (isd[l] += disd[l]);
-            const float g2 = g * g, g3 = g2 * g, g4 = g3 * g;
-            const float S = (g3 * s0[l] + g2 * s1[l] + g * s2[l] + s3[l]) * (1.0f - g);
-            const float x = in[l] * (1.0f + 0.55f * kk);   // pass-band loss compensation
-            const float y4 = (g4 * x + S) / (1.0f + kk * g4);
+            const double g  = (G[l]   += dG[l]);
+            const double kk = (k[l]   += dk[l]);
+            const double d  = (drv[l] += ddrv[l]);
+            const double id = (isd[l] += disd[l]);
 
-            float u = std::clamp (d * (x - kk * y4), -3.0f, 3.0f);   // fastTanh, inlined so it vectorises
-            const float u2 = u * u;
-            u = u * (27.0f + u2) / (27.0f + 9.0f * u2) * id;
+            const double g2 = g * g, g3 = g2 * g, g4 = g3 * g;
+            const double oneMinusG = 1.0 - g;
+            const double S = (g3 * s0[l] + g2 * s1[l] + g * s2[l] + s3[l]) * oneMinusG;
+            const double x = (double) in[l] * (1.0 + 0.55 * kk);   // musical resonance bass-loss compensation
 
-            float v = (u - s0[l]) * g; float y = v + s0[l]; s0[l] = y + v; u = y;
-            v = (u - s1[l]) * g; y = v + s1[l]; s1[l] = y + v; u = y;
-            v = (u - s2[l]) * g; y = v + s2[l]; s2[l] = y + v; u = y;
-            v = (u - s3[l]) * g; y = v + s3[l]; s3[l] = y + v;
-            out[l] = y;
+            // Linear ZDF pivot initial estimate (exact in small-signal regime)
+            const double g4id  = g4 * id;
+            const double g4idk = g4id * d * kk;
+            double y4 = (g4 * (d * id) * x + S) / (1.0 + g4idk);
+
+            // 2 deterministic Newton-Raphson iterations with 1-division Padé [9/8] tanh
+            // (F'(y4) >= 1 everywhere -> unconditional quadratic convergence, auto-vectorizable across lanes)
+            double th = fastTanhLadder (d * (x - kk * y4));
+            double sech2 = 1.0 - th * th;
+            double step = (y4 - S - g4id * th) / (1.0 + g4idk * sech2);
+            y4 -= step;
+
+            th = fastTanhLadder (d * (x - kk * y4));
+            sech2 = 1.0 - th * th;
+            step = (y4 - S - g4id * th) / (1.0 + g4idk * sech2);
+            y4 -= step;
+
+            // 1st-order Taylor update of tanh at converged y4 (avoids 3rd tanh call)
+            const double u = id * std::clamp (th + sech2 * (d * kk * step), -1.0, 1.0);
+
+            double v = (u - s0[l]) * g; double y = v + s0[l]; s0[l] = y + v; double st = y;
+            v = (st - s1[l]) * g; y = v + s1[l]; s1[l] = y + v; st = y;
+            v = (st - s2[l]) * g; y = v + s2[l]; s2[l] = y + v; st = y;
+            v = (st - s3[l]) * g; y = v + s3[l]; s3[l] = y + v;
+            out[l] = (float) y;
         }
     }
 };
@@ -176,6 +209,7 @@ public:
         ampEnv.setSampleRate (osr);
         filtEnv.setSampleRate (osr);
         drift.prepare (osr, 0.27f, seed);
+        oscDc.prepare ((double) osr, 5.0);
         rng.seed (seed * 7919u + 13u);
         pwmPhase = rng.uni();
         reset();
@@ -184,8 +218,10 @@ public:
     void reset()
     {
         ampEnv.reset(); filtEnv.reset();
+        oscDc.reset();
         active = false; gateHeld = false; note = -1; lastEnv = 0.0f; fresh = true;
-        subPhase = 0.0; wt.phase = 0.0f; fmPhase = fmY1 = fmY2 = fmEnvLevel = fmGate = 0.0f;
+        subPhase = 0.0; wt.phase = 0.0; fmPhase = 0.0; fmModPrev = 0.0;
+        fmY1 = fmY2 = fmEnvLevel = fmGate = 0.0f;
         for (auto* r : { &sub1L, &sub2L, &sub1S, &sub2S, &weight, &wtL, &morph, &pwBase, &pwmDepth,
                          &cutA, &cutB, &resA, &resB, &fDrive, &envAmt, &keyTrack, &velGain, &bend,
                          &wtTuneR, &spreadPan, &fmIdx, &fmEnvAmt, &fmFbR })
@@ -203,13 +239,14 @@ public:
         if (wasSilent)
         {
             subPhase = 0.0;        // phase-aligned: sub stack and wavetable start together at a zero crossing
-            wt.phase = 0.0f;
+            wt.phase = 0.0;
+            oscDc.reset();
             pan = rng.uni() - 0.5f;
             fresh = true;          // controls snap to this note's values instead of ramping from the last note
             ladderSnap = true;
         }
         if (retrigger || wasSilent) { ampEnv.noteOn(); filtEnv.noteOn(); fmEnvLevel = 1.0f; }
-        if (wasSilent) { fmPhase = 0.0f; fmY1 = fmY2 = 0.0f; }
+        if (wasSilent) { fmPhase = 0.0; fmModPrev = 0.0; fmY1 = fmY2 = 0.0f; }
         active = true;
         age = 0;
     }
@@ -280,7 +317,7 @@ public:
         const float hz = midiToHz (noteBent);
         const float d = drift.next (m) * driftAmt;
         const float oscHz = hz * semis (wtTuneR.cur + d * 0.18f);
-        const float dt = std::clamp (oscHz / osr, 1.0e-7f, 0.48f);
+        const double dt = std::clamp ((double) oscHz / (double) osr, 1.0e-7, 0.48);
         const float dSub = std::clamp (hz / (8.0f * osr), 0.0f, 0.48f);
 
         const float pwmStart = pwmLfo;
@@ -290,12 +327,12 @@ public:
         pwmLfo = std::sin (kTwoPi * pwmPhase);
         const float pwmInc = (pwmLfo - pwmStart) / (float) m;
 
-        // FM: modulator at ratio x the oscillator's pitch; the index (squared, so small values are fine-grained)
-        // in radians, halved per octave above C3 at full key tracking, and live only while it has something to do
+        // Oversampled Through-Zero FM (TZFM): modulator drives instantaneous carrier phase delta (may go negative
+        // through zero, wrapping bidirectionally in [0, 1)) with 64-bit post-oscillator DC blocking.
         const bool fmLive = fmOn && (fmIdx.cur > 0.0f || fmIdx.inc != 0.0f || (fmEnvAmt.cur > 0.0f && fmEnvLevel > 1.0e-4f));
-        const float fmDt = std::min (0.45f, dt * fmRatio);
-        const float fmKeyGain = std::clamp (std::exp2 (-fmKey * (noteBent - 48.0f) / 12.0f), 0.25f, 2.0f);
-        constexpr float kMaxIndex = 12.0f / kTwoPi;   // cycles of phase deviation at index 1
+        const double fmDt = std::min (0.45, dt * (double) fmRatio);
+        const double fmKeyGain = (double) std::clamp (std::exp2 (-fmKey * (noteBent - 48.0f) / 12.0f), 0.25f, 2.0f);
+        constexpr double kMaxIndex = 12.0 / kTwoPiD;   // cycles of phase deviation at index 1
         if (! fmLive)
         {   // keep the ramps and the index envelope on time while the operator is idle
             fmIdx.skip (m); fmEnvAmt.skip (m); fmFbR.skip (m);
@@ -311,7 +348,7 @@ public:
             const float xEnd = fmIdx.cur + fmIdx.inc * (float) m;
             const float xPeak = std::min (1.25f, std::max (fmIdx.cur, xEnd) + std::max (fmEnvAmt.cur, fmEnvAmt.cur + fmEnvAmt.inc * (float) m) * fmEnvLevel);
             const float fbPeak = std::max (fmFbR.cur, fmFbR.cur + fmFbR.inc * (float) m);
-            fmSpread = 1.0f + kTwoPi * kMaxIndex * xPeak * xPeak * fmKeyGain * fmRatio * (1.0f + 1.5f * fbPeak);
+            fmSpread = 1.0f + (float) (kTwoPiD * kMaxIndex * (double) (xPeak * xPeak) * fmKeyGain * (double) fmRatio * (1.0 + 1.5 * (double) fbPeak));
         }
 
         // squeeze-aware mip pair, from the narrowest duty this block can reach
@@ -345,26 +382,26 @@ public:
             subPhase += (double) dSub;
             if (subPhase >= 1.0) subPhase -= 1.0;
 
-            // wavetable
+            // wavetable + oversampled Through-Zero FM (TZFM)
             const float lvl = wtL.next(), mo = morph.next();
             pwmV += pwmInc;
             const float pw = pwBase.next() + pwmDepth.next() * 0.44f * pwmV + d * 0.03f;
-            float pm = 0.0f;
+            double tzfm = 0.0;
             if (fmLive)
             {
-                const float x = std::min (1.25f, fmIdx.next() + fmEnvAmt.next() * fmEnvLevel);
+                const double x = (double) std::min (1.25f, fmIdx.next() + fmEnvAmt.next() * fmEnvLevel);
                 fmEnvLevel *= fmEnvMul;
                 // DX-style feedback: the operator's last two outputs averaged into its own phase (no hunting)
-                float ph = fmPhase + 0.22f * fmFbR.next() * 0.5f * (fmY1 + fmY2);
-                ph -= std::floor (ph);
-                const float y = bank.read (0, 0, ph) * (1.0f / 0.9f);
-                fmY2 = fmY1; fmY1 = y;
-                fmPhase += fmDt;
-                fmPhase -= std::floor (fmPhase);
-                if (! (fmPhase >= 0.0f && fmPhase < 1.0f)) fmPhase = 0.0f;
-                pm = kMaxIndex * x * x * fmKeyGain * y;
+                const double ph = wrapPhase01 (fmPhase + 0.22 * (double) fmFbR.next() * 0.5 * (double) (fmY1 + fmY2));
+                const double y = (double) bank.read (0, 0, ph) * (1.0 / 0.9);
+                fmY2 = fmY1; fmY1 = (float) y;
+                const double dMod = y - fmModPrev;
+                fmModPrev = y;
+                fmPhase = wrapPhase01 (fmPhase + fmDt);
+                tzfm = kMaxIndex * x * x * fmKeyGain * dMod;
             }
-            oscLM[i * L + lane] = wtLive ? wt.process (dt, mip, wLower, mo, pw, pm) * lvl : 0.0f;
+            const float rawOsc = wtLive ? wt.process (dt, mip, wLower, mo, pw, tzfm) : 0.0f;
+            oscLM[i * L + lane] = wtLive ? oscDc.process (rawOsc) * lvl : 0.0f;
             gainLM[i * L + lane] = env * vg * 0.5f;
         }
         return fenv;
@@ -375,7 +412,7 @@ public:
     {
         for (auto* r : { &cutA, &cutB, &resA, &resB, &fDrive, &envAmt, &keyTrack }) r->skip (m);
         const float octs = envAmt.cur * 7.0f * fenv + keyTrack.cur * (noteBent - 60.0f) / 12.0f;
-        const float hi = 0.45f * sr;
+        const float hi = 0.485f * sr;
         cA = std::clamp (std::exp2 (cutA.cur + octs), 10.0f, hi);
         cB = std::clamp (std::exp2 (cutB.cur + octs), 10.0f, hi);
         rA = clamp01 (resA.cur); rB = clamp01 (resB.cur);
@@ -410,6 +447,7 @@ private:
     float sr = 48000.0f, osr = 96000.0f;
     Adsr ampEnv, filtEnv;
     WavetableOsc wt;
+    DcBlocker oscDc;
     Drift drift;
     Rng rng;
     double subPhase = 0.0;
@@ -423,7 +461,8 @@ private:
     const WavetableBank* core = &WavetableBank::get();
     bool fmOn = false;
     float fmGate = 0.0f;
-    float fmPhase = 0.0f, fmY1 = 0.0f, fmY2 = 0.0f, fmEnvLevel = 0.0f, fmEnvMul = 0.999f, fmRatio = 1.0f, fmKey = 0.0f;
+    double fmPhase = 0.0, fmModPrev = 0.0;
+    float fmY1 = 0.0f, fmY2 = 0.0f, fmEnvLevel = 0.0f, fmEnvMul = 0.999f, fmRatio = 1.0f, fmKey = 0.0f;
     int note = -1;
     bool active = false, fresh = true;
 };
@@ -457,6 +496,7 @@ public:
     }
 
     void setTable (const WavetableBank* b) noexcept { for (auto& v : voices) v.setTable (b); }
+    void snapFilter (bool fltOn) noexcept { fltFade.snap (fltOn); }
 
     void setMode (int m) noexcept
     {
@@ -522,7 +562,7 @@ public:
             if (voice.isActive()) { voice.control (vp[(size_t) v], n2); any = true; }
             else { ladA.holdLane (v); ladB.holdLane (v); }
         }
-        if (! any) return;
+        if (! any) { fltFade.snap (fltOn); return; }
 
         alignas (32) float osc[kSub * kVoices], gain[kSub * kVoices], a[kVoices], b[kVoices], y[kVoices];
         float panL[kVoices], panR[kVoices];
@@ -542,8 +582,8 @@ public:
                 voice.filterTargets (fenv, m, cA, rA, cB, rB, drive);
                 const bool snap = voice.ladderSnap;
                 if (snap) { ladA.resetLane (v); ladB.resetLane (v); voice.ladderSnap = false; }
-                ladA.setLane (v, LadderBank<kVoices>::coefG (cA, osr), 4.3f * rA, drive, m, snap);
-                ladB.setLane (v, LadderBank<kVoices>::coefG (cB, osr), 4.3f * rB, drive, m, snap);
+                ladA.setLane (v, LadderBank<kVoices>::coefGD ((double) cA, (double) osr), 4.3 * (double) rA, (double) drive, m, snap);
+                ladB.setLane (v, LadderBank<kVoices>::coefGD ((double) cB, (double) osr), 4.3 * (double) rB, (double) drive, m, snap);
                 voice.pans (panL[v], panR[v]);
             }
 

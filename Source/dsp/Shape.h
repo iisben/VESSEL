@@ -151,7 +151,7 @@ private:
             const float fc = lerp (fv, cello[k], body) * shift;
             const float qk = q * std::sqrt (fc / 1000.0f) * 0.8f + 1.0f;
             f[0][k].setup (fc, qk, sr); f[1][k].setup (fc, qk, sr);
-            gains[k] = dbToGain (gainsDb[k]) * f[0][k].k;   // k·bp = unity-peak bandpass
+            gains[k] = dbToGain (gainsDb[k]) * (float) f[0][k].k;   // k·bp = unity-peak bandpass
         }
         makeup = 1.6f + res * 1.2f;
     }
