@@ -284,7 +284,7 @@ public:
                             b[v] = V::multiplyAdd (b[v], c, vb);
                         }
                     }
-                    alignas (16) float ra[kPhases], rb[kPhases];
+                    alignas (32) float ra[kPhases], rb[kPhases];
                     for (int v = 0; v < kVecs; ++v) { a[v].copyToRawArray (ra + v * kLanes); b[v].copyToRawArray (rb + v * kLanes); }
                     for (int p = 1; p < kPhases; ++p) pk = std::max ({ pk, std::abs (ra[p]), std::abs (rb[p]) });
                 }
@@ -331,7 +331,7 @@ private:
     static constexpr int kRing = 1024;                 // > kMaxW + 2 * kTaps
     static constexpr std::int64_t kMask = kRing - 1;
     static constexpr std::int64_t kQMask = 511;        // queue never holds more than H + 1
-    alignas (16) float coef[kTaps][kPhases] {};
+    alignas (32) float coef[kTaps][kPhases] {};
     float tapMax[kTaps] {};
     float l1max = 2.0f;
     float xl[2 * kRing] {}, xr[2 * kRing] {}, avg[kMaxW] {}, qv[512] {};

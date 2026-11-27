@@ -6,7 +6,7 @@
 //   Vessel2QA [--baseline] [--strict] [--gates 1,2,3,4,5,6,7,8]
 //             [--out-dir <dir>] [--compare-v1 <csv>]
 //
-// Locked thresholds (VESSEL_V2_SPEC.md Stage 2 — never weakened):
+// Locked DSP QA thresholds (never weakened):
 //   Gate 1: Static/WT/VA aliasing < -80 dBc @ C6, < -75 dBc @ C7;
 //           High-index FM (index 3.0 @ C5, 1:1 & 1:1.414) < -70 dBc (or >= 18 dB over naive 1x)
 //   Gate 2: Bright saw harmonics extend to >= min(0.38*fs, 18000 Hz) @ 48 & 96 kHz;
@@ -1856,6 +1856,7 @@ GateResult runStage4ControlPlaneQA (const fs::path& outDir)
 
 int main (int argc, char** argv)
 {
+    juce::ScopedJuceInitialiser_GUI juceInit;
     bool baselineMode = false;
     bool runStage4 = false;
     std::set<int> enabledGates { 1, 2, 3, 4, 5, 6, 7, 8 };
