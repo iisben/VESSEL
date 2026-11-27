@@ -1,6 +1,8 @@
 # VESSEL
 
-
+I am still learning and using copilot to educate and assist me in learning JUCE. I will not release anything here without
+many hours of bug checks and testing. I will never charge a dime for anything I make until I have full capability of making 
+it the long way from the old world. 
 
 VESSEL is a dark synth and effects rack for scores, trailers, IDM and witch house. 
 
@@ -24,42 +26,31 @@ change the sound. Have fun fellas and fellets
 
 | II · Ruin | III · Shape |
 
-|---|---|
-
 | ![RUIN: tilt, tube, bias, crush, VHS, tape motor](docs/images/stage1.png) | ![SHAPE: ladders, follower, unmask, vox and the gong resonator](docs/images/stage2_gong.png) |
-
 
 
 | IV · Space | V · Pressure |
 
-|---|---|
 
 | ![SPACE: Z-depth, body, black hole and Haas](docs/images/stage3.png) | ![PRESSURE: multiband up/down and the ducker](docs/images/stage4.png) |
-
 
 
 ![Lights out: the window in the dark, lit only where the mouse is](docs/images/torch_far.png)
 
 
-
 ![Dragging LFO 2 onto the resonator's decay: every destination is ringed](docs/images/mapping.png)
-
 
 
 | LFO deck | Expression deck |
 
-|---|---|
 
 | ![A warped LFO with its four routes](docs/images/lfo.png) | ![Velocity, mod wheel and aftertouch routes](docs/images/expression.png) |
 
 
-
 | Preset browser | Cinematic (28 presets, four columns) |
 
-|---|---|
 
 | ![The preset browser](docs/images/browser.png) | ![The Cinematic category](docs/images/browser_cinematic.png) |
-
 
 
 ## What's inside
@@ -142,7 +133,6 @@ everywhere. Each one has a name that fits the sound:
 
 | Macro | Role | Typical routes |
 
-|---|---|---|
 
 | 1 | Tone (Bloom, Bite, Fury, Snap) | filter cutoffs, tilt, exciter |
 
