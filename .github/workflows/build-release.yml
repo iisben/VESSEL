@@ -1,0 +1,201 @@
+name: Build & Release (macOS Universal, Windows x64, Linux x86_64)
+
+on:
+  push:
+    branches: [main, feat/vessel-v2-namm]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PLUGINVAL_VERSION: "v1.0.4"
+
+jobs:
+  macos:
+    name: macOS Universal (arm64 + x86_64 | VST3, AU, Standalone)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Configure (Universal arm64;x86_64 Release)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=/usr/bin/clang \
+            -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DVESSEL_BUILD_QA=ON
+
+      - name: Build VST3, AU, Standalone & Headless QA
+        run: |
+          cmake --build build --config Release --parallel \
+            --target Vessel_VST3 Vessel_AU Vessel_Standalone Vessel2QA Vessel2PresetQA
+
+      - name: Verify Universal Binaries & Ad-Hoc Codesign
+        run: |
+          lipo -info build/Vessel_artefacts/Release/VST3/VESSEL.vst3/Contents/MacOS/VESSEL
+          lipo -info build/Vessel_artefacts/Release/AU/VESSEL.component/Contents/MacOS/VESSEL
+          lipo -info build/Vessel_artefacts/Release/Standalone/VESSEL.app/Contents/MacOS/VESSEL
+          codesign --force --deep --sign - build/Vessel_artefacts/Release/VST3/VESSEL.vst3
+          codesign --force --deep --sign - build/Vessel_artefacts/Release/AU/VESSEL.component
+          codesign --force --deep --sign - build/Vessel_artefacts/Release/Standalone/VESSEL.app
+          codesign --verify --deep --strict build/Vessel_artefacts/Release/VST3/VESSEL.vst3
+          codesign --verify --deep --strict build/Vessel_artefacts/Release/AU/VESSEL.component
+          codesign --verify --deep --strict build/Vessel_artefacts/Release/Standalone/VESSEL.app
+
+      - name: Run 8-Gate DSP QA & 20-Preset Audio QA
+        run: |
+          ./build/Vessel2QA_artefacts/Release/Vessel2QA --strict --stage4-qa
+          ./build/Vessel2PresetQA_artefacts/Release/Vessel2PresetQA --no-wav
+
+      - name: Download & Run pluginval (Strictness Level 5 — VST3 & AU)
+        run: |
+          curl -fSL "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_macOS.zip" -o pluginval.zip
+          unzip -q pluginval.zip -d pluginval_bin
+          PVAL="pluginval_bin/pluginval.app/Contents/MacOS/pluginval"
+          "$PVAL" --strictness-level 5 --validate-in-process --timeout-ms 120000 \
+            --validate build/Vessel_artefacts/Release/VST3/VESSEL.vst3
+          "$PVAL" --strictness-level 5 --validate-in-process --timeout-ms 120000 \
+            --validate build/Vessel_artefacts/Release/AU/VESSEL.component
+
+      - name: Package macOS Universal Archive
+        run: |
+          STAGE="dist/macos/VESSEL-II-macOS-Universal"
+          rm -rf "$STAGE" dist/macos/VESSEL-II-macOS-Universal.zip
+          mkdir -p "$STAGE"
+          ditto build/Vessel_artefacts/Release/VST3/VESSEL.vst3 "$STAGE/VESSEL.vst3"
+          ditto build/Vessel_artefacts/Release/AU/VESSEL.component "$STAGE/VESSEL.component"
+          ditto build/Vessel_artefacts/Release/Standalone/VESSEL.app "$STAGE/VESSEL.app"
+          cp docs/INSTALL-macOS.txt "$STAGE/INSTALL-macOS.txt"
+          ditto -c -k --sequesterRsrc --keepParent "$STAGE" dist/macos/VESSEL-II-macOS-Universal.zip
+          rm -rf "$STAGE"
+
+      - name: Upload macOS Universal Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VESSEL-II-macOS-Universal
+          path: dist/macos/VESSEL-II-macOS-Universal.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64 (MSVC | VST3, Standalone)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (MSVC x64)
+        run: cmake -S . -B build -A x64 -DVESSEL_BUILD_QA=ON
+
+      - name: Build VST3, Standalone & Headless QA
+        run: |
+          cmake --build build --config Release --parallel \
+            --target Vessel_VST3 Vessel_Standalone Vessel2QA Vessel2PresetQA
+
+      - name: Run 8-Gate DSP QA & 20-Preset Audio QA
+        shell: pwsh
+        run: |
+          $qa = Get-ChildItem -Recurse -Filter Vessel2QA.exe build | Select-Object -First 1
+          & $qa.FullName --strict --stage4-qa
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pqa = Get-ChildItem -Recurse -Filter Vessel2PresetQA.exe build | Select-Object -First 1
+          & $pqa.FullName --no-wav
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Download & Run pluginval (Strictness Level 5 — VST3)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/download/$env:PLUGINVAL_VERSION/pluginval_Windows.zip" -OutFile pluginval.zip
+          Expand-Archive -Path pluginval.zip -DestinationPath pluginval_bin -Force
+          $pval = Get-ChildItem -Recurse -Filter pluginval.exe pluginval_bin | Select-Object -First 1
+          & $pval.FullName --strictness-level 5 --validate-in-process --timeout-ms 120000 --validate "build/Vessel_artefacts/Release/VST3/VESSEL.vst3"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package Windows x64 Archive
+        shell: pwsh
+        run: |
+          $stage = "dist/windows/VESSEL-II-Windows-x64"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Force -Path "$stage/Standalone" | Out-Null
+          Copy-Item -Recurse "build/Vessel_artefacts/Release/VST3/VESSEL.vst3" "$stage/"
+          Copy-Item "build/Vessel_artefacts/Release/Standalone/VESSEL.exe" "$stage/Standalone/"
+          Copy-Item -Recurse "build/Vessel_artefacts/Release/Standalone/Wavetables" "$stage/Standalone/"
+          Copy-Item "docs/INSTALL-Windows.txt" "$stage/"
+          Compress-Archive -Path "$stage" -DestinationPath "dist/windows/VESSEL-II-Windows-x64.zip" -Force
+          Remove-Item -Recurse -Force $stage
+
+      - name: Upload Windows x64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VESSEL-II-Windows-x64
+          path: dist/windows/VESSEL-II-Windows-x64.zip
+          if-no-files-found: error
+
+  linux:
+    name: Linux x86_64 (Ubuntu 24.04 GCC | VST3, Standalone)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install JUCE Linux Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config curl unzip xvfb \
+            libasound2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxrender-dev \
+            libgl1-mesa-dev libjack-jackd2-dev ladspa-sdk
+
+      - name: Configure (Linux x86_64 Release)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVESSEL_BUILD_QA=ON
+
+      - name: Build VST3, Standalone & Headless QA
+        run: |
+          cmake --build build --config Release --parallel \
+            --target Vessel_VST3 Vessel_Standalone Vessel2QA Vessel2PresetQA
+
+      - name: Run 8-Gate DSP QA & 20-Preset Audio QA
+        run: |
+          ./build/Vessel2QA_artefacts/Release/Vessel2QA --strict --stage4-qa
+          ./build/Vessel2PresetQA_artefacts/Release/Vessel2PresetQA --no-wav
+
+      - name: Download & Run pluginval (Strictness Level 5 — VST3)
+        run: |
+          curl -fSL "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_Linux.zip" -o pluginval.zip
+          unzip -q pluginval.zip -d pluginval_bin
+          chmod +x pluginval_bin/pluginval
+          xvfb-run -a ./pluginval_bin/pluginval --strictness-level 5 --validate-in-process --timeout-ms 120000 \
+            --validate build/Vessel_artefacts/Release/VST3/VESSEL.vst3
+
+      - name: Package Linux x86_64 Archive
+        run: |
+          STAGE="dist/linux/VESSEL-II-Linux-x86_64"
+          rm -rf "$STAGE" dist/linux/VESSEL-II-Linux-x86_64.tar.gz
+          mkdir -p "$STAGE/Standalone"
+          cp -r build/Vessel_artefacts/Release/VST3/VESSEL.vst3 "$STAGE/"
+          cp build/Vessel_artefacts/Release/Standalone/VESSEL "$STAGE/Standalone/"
+          cp -r build/Vessel_artefacts/Release/Standalone/Wavetables "$STAGE/Standalone/"
+          cp docs/INSTALL-Linux.txt "$STAGE/INSTALL-Linux.txt"
+          tar -czf dist/linux/VESSEL-II-Linux-x86_64.tar.gz -C dist/linux VESSEL-II-Linux-x86_64
+          rm -rf "$STAGE"
+
+      - name: Upload Linux x86_64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VESSEL-II-Linux-x86_64
+          path: dist/linux/VESSEL-II-Linux-x86_64.tar.gz
+          if-no-files-found: error

@@ -20,6 +20,7 @@
 #include "Presets.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <iostream>
+#include <numbers>
 
 using namespace vessel;
 
@@ -113,7 +114,7 @@ Spectrum analyse (const std::vector<float>& l, const std::vector<float>& r, size
         std::fill (buf.begin(), buf.end(), 0.0f);
         for (int i = 0; i < N; ++i)
         {
-            const double w = 0.5 - 0.5 * std::cos (2.0 * M_PI * i / (N - 1));
+            const double w = 0.5 - 0.5 * std::cos (2.0 * std::numbers::pi_v<double> * i / (N - 1));
             buf[(size_t) i] = (float) (0.5 * (l[s + (size_t) i] + r[s + (size_t) i]) * w);
         }
         fft.performFrequencyOnlyForwardTransform (buf.data());
@@ -463,7 +464,7 @@ Character character (const std::vector<float>& L, const std::vector<float>& R, d
         std::fill (bm.begin(), bm.end(), 0.0f); std::fill (bs.begin(), bs.end(), 0.0f);
         for (int i = 0; i < N; ++i)
         {
-            const double w = 0.5 - 0.5 * std::cos (2.0 * M_PI * i / (N - 1));
+            const double w = 0.5 - 0.5 * std::cos (2.0 * std::numbers::pi_v<double> * i / (N - 1));
             bm[(size_t) i] = (float) (0.5 * (L[s + (size_t) i] + R[s + (size_t) i]) * w);
             bs[(size_t) i] = (float) (0.5 * (L[s + (size_t) i] - R[s + (size_t) i]) * w);
         }

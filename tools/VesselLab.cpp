@@ -9,6 +9,7 @@
 #include "dsp/Tables.h"
 #include "PluginProcessor.h"
 #include <iostream>
+#include <numbers>
 
 using namespace vessel;
 
@@ -92,7 +93,7 @@ double aliasDb (const std::vector<float>& x, float f0)
     for (int i = 0; i < N; ++i)
     {
         const double t = (double) i / (double) (N - 1);
-        const double w = 0.35875 - 0.48829 * std::cos (2 * M_PI * t) + 0.14128 * std::cos (4 * M_PI * t) - 0.01168 * std::cos (6 * M_PI * t);
+        const double w = 0.35875 - 0.48829 * std::cos (2 * std::numbers::pi_v<double> * t) + 0.14128 * std::cos (4 * std::numbers::pi_v<double> * t) - 0.01168 * std::cos (6 * std::numbers::pi_v<double> * t);
         buf[(size_t) i] = (float) (x[start + (size_t) i] * w);
     }
     fft.performFrequencyOnlyForwardTransform (buf.data());
@@ -221,7 +222,7 @@ double sineThrough (VesselProcessor& p, float hz, double seconds = 1.0)
         for (int i = 0; i < kBlock; ++i)
         {
             const float v = 0.1f * (float) std::sin (ph);
-            ph += 2.0 * M_PI * hz / kSr;
+            ph += 2.0 * std::numbers::pi_v<double> * hz / kSr;
             buf.setSample (0, i, v); buf.setSample (1, i, v);
         }
         juce::MidiBuffer midi;
@@ -342,11 +343,11 @@ void cpu()
 /** Amplitude of the component at `hz` in x[from, from+len) (Goertzel, Hann window). */
 double goertzel (const std::vector<float>& x, size_t from, size_t len, double hz)
 {
-    const double w = 2.0 * M_PI * hz / kSr, c = 2.0 * std::cos (w);
+    const double w = 2.0 * std::numbers::pi_v<double> * hz / kSr, c = 2.0 * std::cos (w);
     double s1 = 0, s2 = 0, wsum = 0;
     for (size_t i = 0; i < len; ++i)
     {
-        const double win = 0.5 - 0.5 * std::cos (2.0 * M_PI * (double) i / (double) (len - 1));
+        const double win = 0.5 - 0.5 * std::cos (2.0 * std::numbers::pi_v<double> * (double) i / (double) (len - 1));
         const double s0 = x[from + i] * win + c * s1 - s2;
         s2 = s1; s1 = s0; wsum += win;
     }
@@ -360,7 +361,7 @@ double peakNear (const std::vector<float>& x, size_t from, double hz)
     juce::dsp::FFT fft (order);
     std::vector<float> buf ((size_t) N * 2, 0.0f);
     for (int i = 0; i < N && from + (size_t) i < x.size(); ++i)
-        buf[(size_t) i] = (float) (x[from + (size_t) i] * (0.5 - 0.5 * std::cos (2 * M_PI * i / (N - 1))));
+        buf[(size_t) i] = (float) (x[from + (size_t) i] * (0.5 - 0.5 * std::cos (2 * std::numbers::pi_v<double> * i / (N - 1))));
     fft.performFrequencyOnlyForwardTransform (buf.data());
     const double bin = kSr / N;
     const int lo = (int) (hz * 0.88 / bin), hi = (int) (hz * 1.12 / bin);
@@ -608,7 +609,7 @@ double tp16Db (const std::vector<float>& l, const std::vector<float>& r)
         for (int k = 0; k < taps; ++k)
         {
             const double d = (double) p / phases + (half - 1) - k, u = d / half;
-            const double v = std::sin (M_PI * d) / (M_PI * d) * (u * u < 1 ? i0 (10.0 * std::sqrt (1 - u * u)) / i0 (10.0) : 0.0);
+            const double v = std::sin (std::numbers::pi_v<double> * d) / (std::numbers::pi_v<double> * d) * (u * u < 1 ? i0 (10.0 * std::sqrt (1 - u * u)) / i0 (10.0) : 0.0);
             h[(size_t) (p * taps + k)] = v; sum += v;
         }
         for (int k = 0; k < taps; ++k) h[(size_t) (p * taps + k)] /= sum;
@@ -658,8 +659,8 @@ void truePeakLab()
     const float ceil = -1.0f;
     struct Case { const char* name; float gainDb; std::function<float (int, int)> gen; };
     const Case cases[] {
-        { "fs/4 sine, 45 deg, +3 dB", 3.0f, [] (int, int i) { return 0.89f * (float) std::sin (M_PI * 0.5 * i + M_PI * 0.25); } },
-        { "sine 11 kHz +12 dB",      12.0f, [] (int c, int i) { return 0.89f * (float) std::sin (2 * M_PI * 11000.0 * i / kSr + c); } },
+        { "fs/4 sine, 45 deg, +3 dB", 3.0f, [] (int, int i) { return 0.89f * (float) std::sin (std::numbers::pi_v<double> * 0.5 * i + std::numbers::pi_v<double> * 0.25); } },
+        { "sine 11 kHz +12 dB",      12.0f, [] (int c, int i) { return 0.89f * (float) std::sin (2 * std::numbers::pi_v<double> * 11000.0 * i / kSr + c); } },
         { "saw C6 +12 dB",           12.0f, [] (int, int i) { const double ph = std::fmod (1046.5 * i / kSr, 1.0); return 0.89f * (float) (2 * ph - 1); } },
         { "noise bursts +12 dB",     12.0f, [] (int c, int i) {
               static dsp::Rng rng (12345u);
@@ -668,7 +669,7 @@ void truePeakLab()
               return 0.89f * env * rng.bip(); } },
         { "kick 55 Hz +12 dB",       12.0f, [] (int, int i) {
               const int k = i % 24000; const double t = k / kSr;
-              return (float) (0.89 * std::exp (-t * 8.0) * std::sin (2 * M_PI * (55.0 * t + 40.0 * (1 - std::exp (-t * 30.0)) / 30.0))); } },
+              return (float) (0.89 * std::exp (-t * 8.0) * std::sin (2 * std::numbers::pi_v<double> * (55.0 * t + 40.0 * (1 - std::exp (-t * 30.0)) / 30.0))); } },
     };
     for (auto& c : cases)
     {
@@ -683,7 +684,7 @@ void truePeakLab()
 
     // transparency: below the ceiling the stage must be an exact delay
     {
-        auto gen = [] (int c, int i) { return 0.5f * (float) std::sin (2 * M_PI * (997.0 + 50 * c) * i / kSr) + 0.2f * (float) std::sin (2 * M_PI * 15000.0 * i / kSr); };
+        auto gen = [] (int c, int i) { return 0.5f * (float) std::sin (2 * std::numbers::pi_v<double> * (997.0 + 50 * c) * i / kSr) + 0.2f * (float) std::sin (2 * std::numbers::pi_v<double> * 15000.0 * i / kSr); };
         dsp::TruePeakCeiling tp; tp.prepare ((float) kSr);
         std::vector<float> l ((size_t) total), r ((size_t) total), l0 ((size_t) total), r0 ((size_t) total);
         for (int i = 0; i < total; ++i) { l0[(size_t) i] = l[(size_t) i] = gen (0, i); r0[(size_t) i] = r[(size_t) i] = gen (1, i); }
@@ -731,7 +732,7 @@ void truePeakLab()
         auto chord = [] (int c, int i) {
             double v = 0;
             for (double f : { 65.4, 130.8, 164.8, 196.0, 261.6 }) v += 2.0 * std::fmod (f * (1.0 + 0.002 * c) * i / kSr, 1.0) - 1.0;
-            return (float) (0.3 * v * (0.6 + 0.4 * std::sin (2 * M_PI * 0.5 * i / kSr)));
+            return (float) (0.3 * v * (0.6 + 0.4 * std::sin (2 * std::numbers::pi_v<double> * 0.5 * i / kSr)));
         };
         double secs[2] {};
         for (int on = 0; on < 2; ++on)

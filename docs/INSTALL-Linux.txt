@@ -1,0 +1,21 @@
+VESSEL II for Linux (x86_64)
+============================
+
+VST3
+----
+Copy the entire VESSEL.vst3 folder to:
+
+    ~/.vst3/
+
+Keep the folder intact: the 379 wavetables live inside VESSEL.vst3/Contents/Resources/Wavetables.
+Then rescan plug-ins in your Linux VST3 DAW.
+
+Standalone
+----------
+Run Standalone/VESSEL. Keep the Wavetables folder next to the binary.
+
+User Presets & Settings
+-----------------------
+Stored automatically in:
+
+    ~/.config/VESSEL_II/ (via JUCE userApplicationDataDirectory)
