@@ -21,10 +21,10 @@ change the sound. Have fun fellas and fellets
 ![VESSEL, the SOURCE stage with an imported table and the FM operator](docs/images/stage0_fm.png)
 
 
-![RUIN: tilt, tube, bias, crush, VHS, tape motor](docs/images/stage1.png) | ![SHAPE: ladders, follower, unmask, vox and the gong resonator](docs/images/stage2_gong.png) |
+![RUIN: tilt, tube, bias, crush, VHS, tape motor](docs/images/stage1.png) | ![SHAPE: ladders, follower, unmask, vox and the gong resonator](docs/images/stage2_gong.png) 
 
 
-![SPACE: Z-depth, body, black hole and Haas](docs/images/stage3.png) | ![PRESSURE: multiband up/down and the ducker](docs/images/stage4.png) |
+![SPACE: Z-depth, body, black hole and Haas](docs/images/stage3.png) | ![PRESSURE: multiband up/down and the ducker](docs/images/stage4.png) 
 
 
 ![Lights out: the window in the dark, lit only where the mouse is](docs/images/torch_far.png)
@@ -33,16 +33,10 @@ change the sound. Have fun fellas and fellets
 ![Dragging LFO 2 onto the resonator's decay: every destination is ringed](docs/images/mapping.png)
 
 
-LFO deck | Expression deck |
+![A warped LFO with its four routes](docs/images/lfo.png) | ![Velocity, mod wheel and aftertouch routes](docs/images/expression.png) 
 
 
-![A warped LFO with its four routes](docs/images/lfo.png) | ![Velocity, mod wheel and aftertouch routes](docs/images/expression.png) |
-
-
-| Preset browser | Cinematic (28 presets, four columns) |
-
-
-![The preset browser](docs/images/browser.png) | ![The Cinematic category](docs/images/browser_cinematic.png) |
+![The preset browser](docs/images/browser.png) | ![The Cinematic category](docs/images/browser_cinematic.png) 
 
 
 ## What's inside
