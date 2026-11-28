@@ -839,6 +839,7 @@ void Header::resized()
 void Header::mouseDown (const juce::MouseEvent& e)
 {
     if (presetArea().reduced (26, 0).contains (e.getPosition()) && onBrowse) onBrowse();
+    else if (keysArea().contains (e.getPosition()) && onKeys) onKeys();
     else if (lightsArea().contains (e.getPosition()) && onTorch) onTorch();
 }
 
@@ -864,7 +865,7 @@ void Header::paint (juce::Graphics& g)
        #ifdef JucePlugin_VersionString
         const juce::String verText = "v" + juce::String (JucePlugin_VersionString);
        #else
-        const juce::String verText = "v2.0.3";
+        const juce::String verText = "v2.0.4";
        #endif
         const float byW = type::width (type::display (14.0f), "by iisben");
         const auto vf = type::value (10.5f);
@@ -918,7 +919,17 @@ void Header::paint (juce::Graphics& g)
         if (on) g.fillEllipse (juce::Rectangle<float> (4.0f, 4.0f).withCentre (bulb));
         drawCaps (g, "lights out", r.withTrimmedLeft (26.0f), 9.5f, on ? amber : frost, juce::Justification::centredLeft, 0.22f);
     }
-    float x = (float) lightsArea().getX() - 20.0f;
+    // computer keyboard piano pill (auto-ON in Standalone; optional toggle in DAWs)
+    {
+        const auto r = keysArea().toFloat().reduced (0.5f);
+        g.setColour (qwertyOn ? violet.withAlpha (0.20f) : frost.withAlpha (0.04f));
+        g.fillRoundedRectangle (r, 5.0f);
+        g.setColour (qwertyOn ? violet : pewter.withAlpha (0.75f));
+        g.drawRoundedRectangle (r, 5.0f, 1.15f);
+        const juce::String lbl = qwertyOn ? ("KEYS C" + juce::String (qwertyOct)) : "KEYS";
+        drawCaps (g, lbl, r, 9.5f, qwertyOn ? frost : pewter, juce::Justification::centred, 0.16f);
+    }
+    float x = (float) keysArea().getX() - 18.0f;
     for (int i = 3; i >= 0; --i)
     {
         const auto& l = lamps[i];

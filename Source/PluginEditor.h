@@ -20,6 +20,9 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;
+    bool keyStateChanged (bool isKeyDown) override;
+    void focusLost (FocusChangeType) override;
 
     static constexpr int kWidth = 1240, kHeight = 780;
     static constexpr int kDefaultWidth = 1388, kDefaultHeight = 873;
@@ -31,6 +34,9 @@ public:
     /** The torch (the mouse as a flashlight in a dark panel); for snapshots it can be held at a point. */
     void setTorch (bool);
     void aimTorch (std::optional<juce::Point<float>> p) { torch.aim (p); }
+    /** Computer keyboard musical typing (auto-enabled in Standalone, optional toggle in DAWs). */
+    void setQwertyKeys (bool on);
+    void releaseAllQwertyNotes();
 
     // RouteListener
     void routeChanged (vessel::ui::ModSource, int slot, vessel::ui::routing::Result, int targetPid) override;
@@ -59,6 +65,15 @@ private:
 
     int stage = 0;
     bool glWasAlive = false;
+
+    // Computer keyboard piano state (A-K / W-P chromatic keys, Z/X octave, C/V velocity)
+    static constexpr size_t kQwertyKeys = 18;
+    bool qwertyEnabled = false;
+    int qwertyOctave = 3;          // C3 = MIDI 48
+    float qwertyVelocity = 0.85f;
+    std::array<int, kQwertyKeys> heldKeyNotes {};
+    bool textEditorHasFocus() const;
+    void syncQwertyKeyStates();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VesselEditor)
 };

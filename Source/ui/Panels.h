@@ -102,12 +102,18 @@ public:
 
     std::function<void()> onBrowse;   // the preset name was clicked
     std::function<void()> onTorch;    // the Lights Out button was clicked
+    std::function<void()> onKeys;     // the QWERTY keyboard piano pill was clicked
     /** The Lights Out button, top right (header coordinates). */
     juce::Rectangle<int> lightsArea() const { return { getWidth() - 132, getHeight() / 2 - 14, 114, 28 }; }
+    /** Computer keyboard piano toggle pill, left of Lights Out. */
+    juce::Rectangle<int> keysArea() const   { return { lightsArea().getX() - 90, getHeight() / 2 - 14, 80, 28 }; }
     void setBrowserOpen (bool o) { browserOpen = o; repaint(); }
+    void setQwertyState (bool on, int octave) { qwertyOn = on; qwertyOct = octave; repaint(); }
 
 private:
     bool browserOpen = false;
+    bool qwertyOn = false;
+    int qwertyOct = 3;
     juce::Rectangle<int> presetArea() const;
     VesselProcessor& proc;
     juce::TextButton prev { "<" }, next { ">" };

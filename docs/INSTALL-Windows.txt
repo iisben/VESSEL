@@ -13,6 +13,8 @@ Then rescan plug-ins in your DAW. VESSEL shows up as an instrument by iisben.
 Standalone
 ----------
 Run Standalone\VESSEL.exe. Keep the Wavetables folder next to it.
+Connected MIDI keyboards auto-connect on launch (audio input is disabled by default),
+and you can also play using your computer keyboard (KEYS button: A-' white, W-P black, Z/X octave, C/V velocity).
 
 User Presets & Settings
 -----------------------

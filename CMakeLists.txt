@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(VESSEL VERSION 2.0.3 LANGUAGES C CXX)
+project(VESSEL VERSION 2.0.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,6 +97,15 @@ target_link_libraries(Vessel
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags)
+
+# Custom Standalone app: disables default mic input (0 in / 2 out) and auto-opens all MIDI input devices
+if(TARGET Vessel_Standalone)
+  target_sources(Vessel_Standalone PRIVATE Source/StandaloneApp.cpp)
+  target_compile_definitions(Vessel_Standalone PRIVATE JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1)
+  if(MSVC)
+    target_compile_options(Vessel_Standalone PRIVATE /utf-8)
+  endif()
+endif()
 
 # Wavetables (CC0, 16-bit FLAC): copied into each bundle's Contents/Resources/Wavetables
 foreach(fmt VST3 AU Standalone)

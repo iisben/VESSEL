@@ -26,6 +26,12 @@ VesselEditor::VesselEditor (VesselProcessor& p)
     browser->onLoaded = [this] { header->repaint(); };
     header->onBrowse  = [this] { showBrowser (! browser->isVisible()); };
     header->onTorch   = [this] { setTorch (! proc.torchOn.load()); };
+    header->onKeys    = [this] { setQwertyKeys (! qwertyEnabled); };
+
+    heldKeyNotes.fill (-1);
+    qwertyEnabled = proc.isStandaloneApp();
+    header->setQwertyState (qwertyEnabled, qwertyOctave);
+    setWantsKeyboardFocus (true);
 
     canvas.addAndMakeVisible (torch);   // always on top of every page, the browser included
     torch.setOn (proc.torchOn.load());
@@ -45,11 +51,17 @@ VesselEditor::VesselEditor (VesselProcessor& p)
     if (auto* c = getConstrainer()) c->setFixedAspectRatio ((double) kWidth / (double) kHeight);
     setSize (kDefaultWidth, kDefaultHeight);
 
+    if (qwertyEnabled)
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<VesselEditor> (this)] {
+            if (safe != nullptr && safe->isShowing()) safe->grabKeyboardFocus();
+        });
+
     startTimerHz (30);
 }
 
 VesselEditor::~VesselEditor()
 {
+    releaseAllQwertyNotes();
     stopTimer();
     juce::PopupMenu::dismissAllActiveMenus();
     gl.detach();
@@ -104,6 +116,132 @@ void VesselEditor::setTorch (bool on)
     header->repaint();
 }
 
+namespace
+{
+struct QwertyNoteKey { int keyCode; int semitone; };
+constexpr QwertyNoteKey kQwertyMap[18] {
+    { 'A', 0 },  { 'W', 1 },  { 'S', 2 },  { 'E', 3 },  { 'D', 4 },
+    { 'F', 5 },  { 'T', 6 },  { 'G', 7 },  { 'Y', 8 },  { 'H', 9 },
+    { 'U', 10 }, { 'J', 11 }, { 'K', 12 }, { 'O', 13 }, { 'L', 14 },
+    { 'P', 15 }, { ';', 16 }, { '\'', 17 }
+};
+
+int qwertyIndexForKey (int code) noexcept
+{
+    const int upper = (code >= 'a' && code <= 'z') ? (code - 'a' + 'A') : code;
+    for (int i = 0; i < 18; ++i)
+        if (kQwertyMap[i].keyCode == upper) return i;
+    return -1;
+}
+} // namespace
+
+bool VesselEditor::textEditorHasFocus() const
+{
+    return dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr;
+}
+
+void VesselEditor::setQwertyKeys (bool on)
+{
+    if (qwertyEnabled == on) return;
+    if (! on) releaseAllQwertyNotes();
+    qwertyEnabled = on;
+    header->setQwertyState (qwertyEnabled, qwertyOctave);
+    if (on) grabKeyboardFocus();
+}
+
+void VesselEditor::releaseAllQwertyNotes()
+{
+    for (int& note : heldKeyNotes)
+    {
+        if (note >= 0)
+        {
+            proc.pushVirtualNoteOff (note);
+            note = -1;
+        }
+    }
+}
+
+void VesselEditor::syncQwertyKeyStates()
+{
+    if (! qwertyEnabled || textEditorHasFocus())
+        return;
+
+    const auto mods = juce::ModifierKeys::getCurrentModifiersRealtime();
+    if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
+        return;
+
+    const int baseNote = (qwertyOctave + 1) * 12; // C3 = 48
+    for (size_t i = 0; i < kQwertyKeys; ++i)
+    {
+        const bool down = juce::KeyPress::isKeyCurrentlyDown (kQwertyMap[i].keyCode);
+        if (down && heldKeyNotes[i] < 0)
+        {
+            const int midiNote = juce::jlimit (0, 127, baseNote + kQwertyMap[i].semitone);
+            heldKeyNotes[i] = midiNote;
+            proc.pushVirtualNoteOn (midiNote, qwertyVelocity);
+        }
+        else if (! down && heldKeyNotes[i] >= 0)
+        {
+            proc.pushVirtualNoteOff (heldKeyNotes[i]);
+            heldKeyNotes[i] = -1;
+        }
+    }
+}
+
+bool VesselEditor::keyStateChanged (bool)
+{
+    if (! qwertyEnabled || textEditorHasFocus())
+        return false;
+    syncQwertyKeyStates();
+    return true;
+}
+
+bool VesselEditor::keyPressed (const juce::KeyPress& key)
+{
+    if (! qwertyEnabled || textEditorHasFocus())
+        return false;
+
+    const auto mods = key.getModifiers();
+    if (mods.isCommandDown() || mods.isCtrlDown() || mods.isAltDown())
+        return false;
+
+    const int code = key.getKeyCode();
+    const int upper = (code >= 'a' && code <= 'z') ? (code - 'a' + 'A') : code;
+    if (upper == 'Z')
+    {
+        qwertyOctave = juce::jlimit (0, 6, qwertyOctave - 1);
+        header->setQwertyState (qwertyEnabled, qwertyOctave);
+        return true;
+    }
+    if (upper == 'X')
+    {
+        qwertyOctave = juce::jlimit (0, 6, qwertyOctave + 1);
+        header->setQwertyState (qwertyEnabled, qwertyOctave);
+        return true;
+    }
+    if (upper == 'C')
+    {
+        qwertyVelocity = juce::jlimit (0.35f, 1.0f, qwertyVelocity - 0.12f);
+        return true;
+    }
+    if (upper == 'V')
+    {
+        qwertyVelocity = juce::jlimit (0.35f, 1.0f, qwertyVelocity + 0.12f);
+        return true;
+    }
+    if (qwertyIndexForKey (code) >= 0)
+    {
+        syncQwertyKeyStates();
+        return true;
+    }
+    return false;
+}
+
+void VesselEditor::focusLost (FocusChangeType)
+{
+    releaseAllQwertyNotes();
+}
+
 void VesselEditor::setDropPreview (bool on)
 {
     for (auto* s : registry.sliders) s->setDropCandidate (on && vessel::ui::routing::isDestination (s->pid));
@@ -153,7 +291,7 @@ void VesselEditor::timerCallback()
     for (auto* s : registry.sliders)
         s->setModulation (t.modOffset[(size_t) s->pid].load (std::memory_order_relaxed));
 
-    header->repaint (header->getWidth() - 320, 0, 320, header->getHeight());
+    header->repaint (header->getWidth() - 480, 0, 480, header->getHeight());
     spine->repaint (0, 0, spine->getWidth(), Spine::kTop + 5 * Spine::kStageH);
     pages[(size_t) stage]->refresh();
     rail->refresh();

@@ -405,12 +405,60 @@ void VesselProcessor::handleMidi (const juce::MidiMessage& m)
     else if (m.isResetAllControllers()) { resetExpressionState(); }
 }
 
+void VesselProcessor::pushVirtualMidiRaw (uint8_t status, uint8_t d1, uint8_t d2) noexcept
+{
+    const uint32_t w = virtMidiWrite.load (std::memory_order_relaxed);
+    const uint32_t next = (w + 1u) & (kVirtMidiCap - 1u);
+    if (next == virtMidiRead.load (std::memory_order_acquire))
+        return; // full: drop safely without blocking
+    virtMidiBuf[w] = (uint32_t) status | ((uint32_t) d1 << 8u) | ((uint32_t) d2 << 16u);
+    virtMidiWrite.store (next, std::memory_order_release);
+}
+
+void VesselProcessor::pushVirtualNoteOn (int note, float velocity) noexcept
+{
+    const auto n = (uint8_t) juce::jlimit (0, 127, note);
+    const auto v = (uint8_t) juce::jlimit (1, 127, (int) std::lround (std::clamp (velocity, 0.01f, 1.0f) * 127.0f));
+    pushVirtualMidiRaw (0x90u, n, v);
+}
+
+void VesselProcessor::pushVirtualNoteOff (int note) noexcept
+{
+    const auto n = (uint8_t) juce::jlimit (0, 127, note);
+    pushVirtualMidiRaw (0x80u, n, 0u);
+}
+
+void VesselProcessor::pushVirtualAllNotesOff() noexcept
+{
+    pushVirtualMidiRaw (0xB0u, 123u, 0u);
+}
+
+void VesselProcessor::drainVirtualMidi() noexcept
+{
+    uint32_t r = virtMidiRead.load (std::memory_order_relaxed);
+    const uint32_t w = virtMidiWrite.load (std::memory_order_acquire);
+    while (r != w)
+    {
+        const uint32_t packed = virtMidiBuf[r];
+        r = (r + 1u) & (kVirtMidiCap - 1u);
+        const uint8_t bytes[3] {
+            (uint8_t) (packed & 0xFFu),
+            (uint8_t) ((packed >> 8u) & 0xFFu),
+            (uint8_t) ((packed >> 16u) & 0xFFu)
+        };
+        handleMidi (juce::MidiMessage (bytes, 3));
+    }
+    virtMidiRead.store (r, std::memory_order_release);
+}
+
 void VesselProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
     const int n = buffer.getNumSamples();
     if (! baseReady || snapPending.exchange (false, std::memory_order_acq_rel))
         snapToCurrentState();
+
+    drainVirtualMidi();
 
     struct ScopedAudioTable
     {

@@ -16,6 +16,8 @@ Copy VESSEL.vst3 to:
 Standalone
 ----------
 Copy VESSEL.app to /Applications or ~/Applications.
+Connected MIDI keyboards auto-connect on launch (microphone/audio input is disabled by default),
+and you can also play using your computer keyboard (KEYS button: A-' white, W-P black, Z/X octave, C/V velocity).
 
 User Presets & Settings
 -----------------------

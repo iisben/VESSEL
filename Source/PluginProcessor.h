@@ -159,6 +159,14 @@ public:
     /** The torch UI (the panel in the dark, the mouse a flashlight): saved with the session, off by default. */
     std::atomic<bool> torchOn { false };
 
+    /** True when hosted as the Standalone desktop app (used to auto-enable QWERTY keyboard play). */
+    bool isStandaloneApp() const noexcept { return wrapperType == wrapperType_Standalone; }
+
+    /** Lock-free virtual MIDI injection from the UI (QWERTY keyboard piano) to the audio thread. */
+    void pushVirtualNoteOn (int note, float velocity) noexcept;
+    void pushVirtualNoteOff (int note) noexcept;
+    void pushVirtualAllNotesOff() noexcept;
+
 private:
     struct ABSnapshot
     {
@@ -347,6 +355,14 @@ private:
     std::array<ABSnapshot, 2> abSlots {};
     float scopeDecim = 0.0f;
     float peakHoldL = 0.0f, peakHoldR = 0.0f;
+
+    // Lock-free SPSC ring buffer for UI QWERTY keyboard -> audio thread MIDI events (0 allocs, 0 locks)
+    static constexpr uint32_t kVirtMidiCap = 128u;
+    std::array<uint32_t, kVirtMidiCap> virtMidiBuf {};
+    std::atomic<uint32_t> virtMidiWrite { 0u };
+    std::atomic<uint32_t> virtMidiRead { 0u };
+    void pushVirtualMidiRaw (uint8_t status, uint8_t d1, uint8_t d2) noexcept;
+    void drainVirtualMidi() noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VesselProcessor)
 };

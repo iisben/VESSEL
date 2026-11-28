@@ -13,6 +13,8 @@ Then rescan plug-ins in your Linux VST3 DAW (REAPER, Bitwig, Ardour, Renoise, et
 Standalone
 ----------
 Run Standalone/VESSEL. Keep the Wavetables folder next to the binary.
+Connected MIDI keyboards auto-connect on launch (audio input is disabled by default),
+and you can also play using your computer keyboard (KEYS button: A-' white, W-P black, Z/X octave, C/V velocity).
 
 User Presets & Settings
 -----------------------
