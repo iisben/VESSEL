@@ -5,11 +5,109 @@
 namespace vessel::dsp
 {
 //==============================================================================
-/** (6) Asymmetric thermionic drive with 64-bit double ADAA2 (2nd-order antiderivative antialiasing).
-    Runs inside RuinCore's 4x Type-I linear-phase FIR oversampled block. Three bias topologies after the
-    classic triode / pentode / bias-starved switch, each with exact closed-form F0, F1, and F2 antiderivatives,
-    calibrated midpoint fallbacks, 64-bit ~5 Hz DC blocking, 1-sample phase-aligned dry mix, and click-free
-    mode-switch crossfade. */
+/** Lightweight, real-time-safe 64-bit stateful Magnetic Hysteresis & Iron Transformer core.
+    - 2-state magnetic core physics (sample-rate invariant across 44.1-192 kHz):
+        1) phiLf / eLf: 120 Hz Faraday leaky flux integrator + 18 ms flux-energy envelope so low-frequency
+           input energy dynamically modulates the upper-harmonic saturation operating point.
+        2) magM: smooth C-infinity 1.1 kHz remanent magnetization / domain-wall hysteresis state (zero sign()
+           discontinuities -> genuine open B-H hysteresis loop without aliasing buzz; strictly BIBO stable).
+    - 64-bit ADAA1 on the static anhysteretic B-H curve tanh(u) with cached F1(uPrev) (1 tanhF1/sample).
+    - Gentle transformer leakage-inductance HF silk + 64-bit ~5 Hz DC blocker.
+    - Bypasses cleanly at 0% drive with 0 added latency. */
+struct MagneticTransformerCore
+{
+    static constexpr double kEps1 = 1.0e-5;
+
+    void prepare (double sampleRate) noexcept
+    {
+        sr = std::max (sampleRate, 1.0);
+        aFlux = 1.0 - std::exp (-kTwoPiD * 120.0 / sr);
+        aEnv  = 1.0 - std::exp (-1.0 / (0.018 * sr));
+        aRem  = 1.0 - std::exp (-kTwoPiD * 1100.0 / sr);
+        aSilk = 1.0 - std::exp (-kTwoPiD * std::min (22000.0, 0.45 * sr) / sr);
+        lastSilkDrive = -1.0;
+        dc.prepare (sr, 5.0);
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        phiLf = eLf = magM = silkZ = uPrev = f1Prev = 0.0;
+        dc.reset();
+    }
+
+    /** Process one sample at the configured (2x/4x oversampled) rate.
+        lfKey: pre-stage signal used to track low-frequency magnetic flux (can equal x).
+        driveAmt, hystAmt in [0, 1]; gainIn >= 1.0; makeup scales output; extBias shifts static B-H point. */
+    inline double processSample (double x, double lfKey, double driveAmt, double hystAmt,
+                                 double gainIn, double makeup, double extBias = 0.0,
+                                 double silkHz = 0.0) noexcept
+    {
+        if (driveAmt <= 1.0e-6 && hystAmt <= 1.0e-6 && std::abs (extBias) <= 1.0e-6)
+        {
+            phiLf = eLf = magM = silkZ = uPrev = f1Prev = 0.0;
+            return x;
+        }
+
+        if (silkHz > 0.0)
+        {
+            if (std::abs (silkHz - lastSilkDrive) > 1.0)
+            {
+                lastSilkDrive = silkHz;
+                aSilk = 1.0 - std::exp (-kTwoPiD * std::min (silkHz, 0.45 * sr) / sr);
+            }
+        }
+        else if (std::abs (driveAmt - lastSilkDrive) > 1.0e-3)
+        {
+            lastSilkDrive = driveAmt;
+            const double fcSilk = std::min (22000.0 - 4500.0 * driveAmt, 0.45 * sr);
+            aSilk = 1.0 - std::exp (-kTwoPiD * fcSilk / sr);
+        }
+
+        // 1. Low-frequency magnetic flux integrator (Faraday B ~ integral V dt, leaky @ 120 Hz)
+        phiLf = flushDenormal (phiLf + aFlux * (lfKey - phiLf));
+        eLf   = flushDenormal (eLf + aEnv * (phiLf * phiLf - eLf));
+        const double lfMod = eLf / (0.15 + eLf);   // bounded [0, 1) LF flux energy modulation
+
+        // 2. Dynamic operating point: LF energy + LF flux + remanent magnetization shift the B-H curve
+        const double gDyn = gainIn * (1.0 + 0.32 * driveAmt * lfMod);
+        const double statBias = extBias + 0.075 * driveAmt * lfMod;
+        const double cFlux = 0.26 * driveAmt;
+        const double cHyst = std::min (0.28, 0.24 * hystAmt);   // strictly contractive (< 0.35)
+        const double u = x * gDyn + statBias + cFlux * phiLf + cHyst * magM;
+
+        // 3. 64-bit ADAA1 on static anhysteretic B-H curve tanh(u) with cached F1(uPrev)
+        const double f1Now = tanhF1 (u);
+        const double du = u - uPrev;
+        const double yBh = (std::abs (du) > kEps1)
+                               ? ((f1Now - f1Prev) / du)
+                               : fastTanhD (0.5 * (u + uPrev));
+        uPrev = u;
+        f1Prev = f1Now;
+
+        // 4. Smooth domain-wall hysteresis relaxation (remanent magnetization state)
+        magM = flushDenormal (magM + aRem * (yBh - magM));
+
+        // 5. Remove static operating-point offset, apply calibrated makeup, transformer HF silk & 5 Hz DC block
+        const double yCal = (yBh - fastTanhD (statBias)) * makeup;
+        silkZ = flushDenormal (silkZ + aSilk * (yCal - silkZ));
+        return dc.process (silkZ);
+    }
+
+    double sr = 192000.0;
+    double aFlux = 0.003919, aEnv = 0.000289, aRem = 0.03536, aSilk = 0.513;
+    double lastSilkDrive = -1.0;
+    double phiLf = 0.0, eLf = 0.0, magM = 0.0, silkZ = 0.0;
+    double uPrev = 0.0, f1Prev = 0.0;
+    DcBlocker dc;
+};
+
+//==============================================================================
+/** (6) Asymmetric thermionic drive with 64-bit double ADAA2 + coupled 64-bit Magnetic Hysteresis
+    & Iron Output Transformer stage. Runs inside RuinCore's 4x Type-I linear-phase FIR oversampled block.
+    Three bias topologies after the classic triode / pentode / bias-starved switch, each with exact closed-form
+    F0, F1, and F2 antiderivatives, calibrated midpoint fallbacks, LF-flux iron-core operating-point modulation,
+    64-bit ~5 Hz DC blocking, 1-sample phase-aligned dry mix, and click-free mode-switch crossfade. */
 class TubeDrive
 {
 public:
@@ -21,6 +119,10 @@ public:
     void prepare (float osRate)
     {
         for (auto& d : dc) d.prepare ((double) osRate, 5.0);
+        const double r = std::max ((double) osRate, 1.0);
+        aFlux = 1.0 - std::exp (-kTwoPiD * 120.0 / r);
+        aEnv  = 1.0 - std::exp (-1.0 / (0.018 * r));
+        aRem  = 1.0 - std::exp (-kTwoPiD * 1100.0 / r);
         driveS.prepare (osRate, 30.0f); driveS.snap (0.0f);
         biasS.prepare (osRate, 30.0f);  biasS.snap (0.0f);
         mixS.prepare (osRate, 20.0f);   mixS.snap (0.0f);
@@ -35,6 +137,7 @@ public:
         for (int c = 0; c < 2; ++c)
         {
             x1[c] = x2[c] = f1_1[c] = f2_1[c] = f2_2[c] = bPrev[c] = 0.0;
+            phiLf[c] = eLf[c] = magM[c] = 0.0;
             modePrev[c] = -1;
             dryPrev[c] = 0.0f;
         }
@@ -218,8 +321,29 @@ public:
             const float dryL = dryPrev[0]; dryPrev[0] = l[i];
             const float dryR = dryPrev[1]; dryPrev[1] = r[i];
 
-            const double inL = (double) l[i] * g;
-            const double inR = (double) r[i] * g;
+            const double rawL = (double) l[i];
+            const double rawR = (double) r[i];
+
+            // 2-state magnetic flux & hysteresis operating-point modulation (bypassed cleanly at d == 0):
+            // LF flux dynamically shifts the ADAA2 tube/transformer operating point in a single stage (0 extra aliasing)
+            double magBiasL = 0.0, magBiasR = 0.0;
+            if (d > 1.0e-5f)
+            {
+                const double dd = (double) d;
+                phiLf[0] = flushDenormal (phiLf[0] + aFlux * (rawL - phiLf[0]));
+                phiLf[1] = flushDenormal (phiLf[1] + aFlux * (rawR - phiLf[1]));
+                eLf[0]   = flushDenormal (eLf[0] + aEnv * (phiLf[0] * phiLf[0] - eLf[0]));
+                eLf[1]   = flushDenormal (eLf[1] + aEnv * (phiLf[1] * phiLf[1] - eLf[1]));
+                const double lfModL = eLf[0] / (0.15 + eLf[0]);
+                const double lfModR = eLf[1] / (0.15 + eLf[1]);
+                const double cFlux = 0.42 * dd;
+                const double cHyst = 0.18 * dd;   // strictly contractive across all 3 tube modes
+                magBiasL = cFlux * phiLf[0] + 0.09 * dd * lfModL + cHyst * magM[0];
+                magBiasR = cFlux * phiLf[1] + 0.09 * dd * lfModR + cHyst * magM[1];
+            }
+
+            const double inL = rawL * g + magBiasL;
+            const double inR = rawR * g + magBiasR;
 
             double yl = stepChannel (0, inL, bd, curMode);
             double yr = stepChannel (1, inR, bd, curMode);
@@ -232,6 +356,16 @@ public:
                 yl += (double) modeFade * (oldL - yl);
                 yr += (double) modeFade * (oldR - yr);
                 modeFade = std::max (0.0f, modeFade - modeStep);
+            }
+
+            if (d > 1.0e-5f)
+            {
+                magM[0] = flushDenormal (magM[0] + aRem * (yl - magM[0]));
+                magM[1] = flushDenormal (magM[1] + aRem * (yr - magM[1]));
+            }
+            else
+            {
+                phiLf[0] = phiLf[1] = eLf[0] = eLf[1] = magM[0] = magM[1] = 0.0;
             }
 
             const float wl = (float) dc[0].process (yl);
@@ -269,6 +403,8 @@ private:
 
     DcBlocker dc[2];
     Smooth driveS, biasS, mixS, outS;
+    double aFlux = 0.003919, aEnv = 0.000289, aRem = 0.03536;
+    double phiLf[2] {}, eLf[2] {}, magM[2] {};
     double x1[2] {}, x2[2] {}, prevX1[2] {}, prevX2[2] {};
     double f1_1[2] {}, f2_1[2] {}, f2_2[2] {}, bPrev[2] {};
     int modePrev[2] { -1, -1 };
@@ -280,7 +416,8 @@ private:
 
 //==============================================================================
 /** (10) Analog bias modulator: programme-dependent supply sag (gain drops + bias walks as current is drawn)
-    feeding a 64-bit magnetic tape curve with hysteresis memory and head-gap HF loss. Runs at the 4x rate. */
+    feeding the 64-bit stateful Magnetic Hysteresis & Iron Transformer core with LF-flux dynamic-bias modulation,
+    ADAA1 on the static B-H curve, head-gap HF silk, and ~5 Hz 64-bit DC blocking. Runs at the 4x rate. */
 class BiasModulator
 {
 public:
@@ -289,13 +426,17 @@ public:
     void prepare (float rate)
     {
         sr = rate;
-        for (auto& d : dc) d.prepare ((double) sr, 5.0);
-        y1[0] = y1[1] = 0.0;
-        xPrev[0] = xPrev[1] = 0.0;
-        head[0].reset(); head[1].reset();
-        kR.reset(); isR.reset(); hystR.reset(); amtR.reset(); sagR.reset();
+        for (auto& c : core) c.prepare ((double) sr);
+        kR.reset(); isR.reset(); satR.reset(); amtR.reset(); sagR.reset();
         env.reset();
-        lastSpeedMs = -1.0f; lastSat = -1.0f;
+        lastSpeedMs = -1.0f;
+        headHz = std::min (20000.0, 0.45 * (double) sr);
+    }
+
+    void resetState() noexcept
+    {
+        for (auto& c : core) c.reset();
+        env.reset();
     }
 
     void process (float* l, float* r, int m, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
@@ -310,68 +451,54 @@ public:
             }
             const float kT = 1.0f + p.sat * 5.0f;
             kR.to (kT, ctrlSpan); isR.to (1.0f / std::sqrt (kT), ctrlSpan);
-            hystR.to (0.35f * p.sat, ctrlSpan); amtR.to (0.3f * p.amount, ctrlSpan); sagR.to (p.sag, ctrlSpan);
-            if (std::abs (p.sat - lastSat) > 1.0e-5f)
-            {
-                lastSat = p.sat;
-                const float hf = std::min (20000.0f * (1.0f - 0.55f * p.sat), 0.45f * sr);
-                head[0].setCutoff (hf, sr); head[1].setCutoff (hf, sr);
-            }
+            satR.to (clamp01 (p.sat), ctrlSpan); amtR.to (0.3f * p.amount, ctrlSpan); sagR.to (p.sag, ctrlSpan);
+            headHz = std::min (20000.0 * (1.0 - 0.55 * (double) clamp01 (p.sat)), 0.45 * (double) sr);
         }
 
         for (int i = 0; i < m; ++i)
         {
-            const double k = (double) kR.next(), is = (double) isR.next(), hyst = (double) hystR.next();
+            const double k = (double) kR.next(), is = (double) isR.next(), sat = (double) satR.next();
             const double amt = (double) amtR.next(), sag = (double) sagR.next();
             const double e = (double) std::min (2.0f, env.process (0.5f * (l[i] + r[i])) * 2.0f);
             const double sagGain = 1.0 / (1.0 + sag * 3.0 * e);
             const double b = amt + sag * 0.25 * e;
-            const double stat = fastTanhD (b);
+            const double gIn = sagGain * k;
 
-            float* io[2] { l + i, r + i };
-            for (int c = 0; c < 2; ++c)
-            {
-                const double in = (double) (*io[c]) * sagGain * k + b;
-                double y;
-                if (hyst < 1.0e-5)
-                {
-                    // Pure feedforward path -> 64-bit ADAA1 of tanh
-                    const double dx = in - xPrev[c];
-                    y = std::abs (dx) > 1.0e-5 ? (tanhF1 (in) - tanhF1 (xPrev[c])) / dx
-                                               : fastTanhD (0.5 * (in + xPrev[c]));
-                    xPrev[c] = in;
-                }
-                else
-                {
-                    // Feedback hysteresis path -> smooth 64-bit C-infinity tanh (never ADAA inside feedback)
-                    y = fastTanhD (in + hyst * (y1[c] - 0.5 * in));
-                    xPrev[c] = in;
-                }
-                y1[c] = y;
-                *io[c] = (float) dc[c].process ((double) head[c].process ((float) ((y - stat) * is)));
-            }
+            const double xl = (double) l[i];
+            const double xr = (double) r[i];
+            l[i] = (float) core[0].processSample (xl, xl, sat, sat, gIn, is, b, headHz);
+            r[i] = (float) core[1].processSample (xr, xr, sat, sat, gIn, is, b, headHz);
         }
     }
 
 private:
-    float sr = 192000.0f, lastSpeedMs = -1.0f, lastSat = -1.0f;
-    double y1[2] {}, xPrev[2] {};
+    float sr = 192000.0f, lastSpeedMs = -1.0f;
+    double headHz = 20000.0;
+    MagneticTransformerCore core[2];
     EnvFollower env;
-    DcBlocker dc[2];
-    OnePole head[2];
-    Ramp kR, isR, hystR, amtR, sagR;
+    Ramp kR, isR, satR, amtR, sagR;
 };
 
 //==============================================================================
 /** The non-linear core of RUIN in one 4x Type-I linear-phase FIR oversampled block:
-    (6) ADAA2 tube -> (15) post tilt -> (10) tape bias.
+    (6) ADAA2 tube + iron transformer -> (15) post tilt -> (10) magnetic hysteresis bias core.
     Uses equiripple linear-phase halfband FIR + exact integer oversampled padding (0..3 samples at 4x)
     so total active latency is an exact linear-phase integer (0-sample PDC error, phase-exact sub alignment),
-    and bypasses at 0-sample latency when both nonlinear modules are off at prepareToPlay. */
+    and bypasses cleanly at 0-sample latency when nonlinear drive stages are off or at 0% drive. */
 class RuinCore
 {
 public:
     struct Params { TubeDrive::Params tube; float postTiltDb = 0, postPivot = 1200; BiasModulator::Params bias; };
+
+    static bool isTubeActive (const TubeDrive::Params& t) noexcept
+    {
+        return t.on && (t.drive > 1.0e-5f || std::abs (t.bias) > 1.0e-5f || std::abs (t.outDb) > 1.0e-4f);
+    }
+
+    static bool isBiasActive (const BiasModulator::Params& b) noexcept
+    {
+        return b.on && (b.sat > 1.0e-5f || std::abs (b.amount) > 1.0e-5f || b.sag > 1.0e-5f);
+    }
 
     void prepare (float sampleRate, int maxBlock)
     {
@@ -398,13 +525,14 @@ public:
 
     void snapBias (bool on) { biasFade.snap (on); }
 
-    /** Synchronous state snap (called from prepareToPlay / state load): configures exact 0-latency bypass when dry. */
-    void snap (bool tubeOn, bool biasOn)
+    /** Synchronous state snap (called from prepareToPlay / state load): configures exact 0-latency bypass when dry or 0% drive. */
+    void snap (bool tubeActive, bool biasActive)
     {
-        osActive = tubeOn || biasOn;
-        biasFade.snap (biasOn);
+        osActive = tubeActive || biasActive;
+        biasFade.snap (biasActive);
         os.reset();
         tube.resetState();
+        bias.resetState();
         tilt[0].reset(); tilt[1].reset();
         resetPads();
     }
@@ -412,7 +540,9 @@ public:
     void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0)
     {
         if (ctrlSpan <= 0) ctrlSpan = n;
-        if (! osActive && ! p.tube.on && ! p.bias.on)
+        const bool tubeLive = isTubeActive (p.tube);
+        const bool biasLive = isBiasActive (p.bias);
+        if (! osActive && ! tubeLive && ! biasLive)
         {
             // True 0-latency 1x bypass path (linear post-tilt only)
             if (isCtrlTick)
@@ -434,6 +564,7 @@ public:
             osActive = true;
             os.reset();
             tube.resetState();
+            bias.resetState();
             tilt[0].reset(); tilt[1].reset();
             resetPads();
         }

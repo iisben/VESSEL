@@ -731,6 +731,116 @@ GateResult runGate3()
                                + " dBFS [" + (ok ? "OK" : "FAIL") + "]");
     }
 
+    // Part C: Magnetic Hysteresis & Iron Transformer Core (C6 & 6 kHz aliasing < -75 dBc, DC < -90 dBFS,
+    // LF->HF operating-point modulation, and 0% drive clean 0-latency bypass)
+    {
+        double magWorstAlias = -300.0, magWorstDc = -300.0;
+        bool magFinite = true;
+        for (double f0 : { midiToHzD (84), 6017.0 })
+        {
+            dsp::RuinCore rc;
+            rc.prepare ((float) sr, 512);
+            dsp::RuinCore::Params p {};
+            p.tube.on = false;
+            p.bias.on = true;
+            p.bias.sat = 0.70f;
+            p.bias.sag = 0.25f;
+            p.bias.amount = 0.10f;
+            p.bias.speedMs = 80.0f;
+            rc.snap (false, true);
+
+            std::vector<float> y ((size_t) total), rCh ((size_t) total);
+            for (int i = 0; i < total; ++i)
+            {
+                const float x = (float) (amp * std::sin (kTwoPiD * f0 * (double) i / sr));
+                y[(size_t) i] = x;
+                rCh[(size_t) i] = x;
+            }
+            for (int pos = 0; pos < total; pos += 512)
+            {
+                const int n = std::min (512, total - pos);
+                rc.process (y.data() + pos, rCh.data() + pos, n, p);
+            }
+            for (float v : y) if (! std::isfinite (v)) magFinite = false;
+            const auto m = measureHarmonicAliasing (y, sr, f0, order);
+            magWorstAlias = std::max (magWorstAlias, m.aliasedDbc);
+            magWorstDc = std::max (magWorstDc, m.dcDbfs);
+        }
+
+        // Verify low-frequency energy dynamically modulates upper-harmonic saturation operating point
+        double lfModGainDb = 0.0;
+        {
+            auto measureH2Db = [&] (bool withBass)
+            {
+                dsp::RuinCore rc;
+                rc.prepare ((float) sr, 512);
+                dsp::RuinCore::Params p {};
+                p.tube.on = false;
+                p.bias.on = true;
+                p.bias.sat = 0.65f;
+                p.bias.sag = 0.0f;
+                p.bias.amount = 0.0f;
+                rc.snap (false, true);
+                std::vector<float> y ((size_t) total), rCh ((size_t) total);
+                for (int i = 0; i < total; ++i)
+                {
+                    const double t = (double) i / sr;
+                    double x = 0.18 * std::sin (kTwoPiD * 3000.0 * t);
+                    if (withBass) x += 0.55 * std::sin (kTwoPiD * 80.0 * t);
+                    y[(size_t) i] = rCh[(size_t) i] = (float) x;
+                }
+                for (int pos = 0; pos < total; pos += 512)
+                    rc.process (y.data() + pos, rCh.data() + pos, std::min (512, total - pos), p);
+                const auto sp = bhSpectrumPow (y, (size_t) (total - N), order);
+                const double binHz = sr / (double) N;
+                auto bandPow = [&] (double fHz)
+                {
+                    const int b = (int) std::llround (fHz / binHz);
+                    double acc = 0.0;
+                    for (int k = std::max (1, b - 3); k <= std::min (N / 2 - 1, b + 3); ++k) acc += sp[(size_t) k];
+                    return acc;
+                };
+                return powToDb ((bandPow (6000.0) + 1.0e-30) / (bandPow (3000.0) + 1.0e-30));
+            };
+            lfModGainDb = measureH2Db (true) - measureH2Db (false);
+        }
+
+        // Verify 0% drive clean bypass with 0 added latency
+        bool zeroLatBypOk = false;
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, wt_on, 0.0f);
+            setP (*p, in_level, 1.0f);
+            setP (*p, tube_on, 1.0f);
+            setP (*p, tube_drive, 0.0f);
+            setP (*p, tube_bias, 0.0f);
+            setP (*p, tube_out, 0.0f);
+            setP (*p, bias_on, 0.0f);
+            setP (*p, clip_on, 0.0f);
+            p->prepareToPlay (sr, 512);
+            const int repLat = p->getLatencySamples();
+            std::vector<float> imp (1024, 0.0f);
+            imp[100] = 0.5f;
+            auto r = renderEvents (*p, sr, 1024, { 512 }, {}, &imp, &imp);
+            double maxDiff = 0.0;
+            for (int i = 0; i < 1024; ++i)
+                maxDiff = std::max (maxDiff, std::abs ((double) r.l[(size_t) i] - (double) imp[(size_t) i]));
+            zeroLatBypOk = (repLat == 0) && (maxDiff < 1.0e-5) && (r.nonFiniteCount == 0);
+        }
+
+        const bool magOk = magFinite && (magWorstAlias < -75.0) && (magWorstDc < -90.0)
+                        && (lfModGainDb >= 10.0) && zeroLatBypOk;
+        if (! magOk) anyFail = true;
+        worstAliasDbc = std::max (worstAliasDbc, magWorstAlias);
+        worstDcDbfs = std::max (worstDcDbfs, magWorstDc);
+        res.details.push_back ("Magnetic Hysteresis Core (C6/6k): alias=" + fmt (magWorstAlias, 1)
+                               + " dBc (lim<-75), DC=" + fmt (magWorstDc, 1)
+                               + " dBFS (lim<-90), LF->HF H2=" + fmt (lfModGainDb, 1)
+                               + " dB, 0%-drv 0-lat=" + std::string (zeroLatBypOk ? "OK" : "FAIL")
+                               + " [" + (magOk ? "OK" : "FAIL") + "]");
+    }
+
     res.status = anyFail ? GateStatus::Fail : (anyPending ? GateStatus::Pending : GateStatus::Pass);
     res.summary = "worstAlias=" + fmt (worstAliasDbc, 1) + " dBc, worstDC=" + fmt (worstDcDbfs, 1) + " dBFS"
                 + (anyPending ? " (ADAA PENDING)" : "");

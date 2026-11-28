@@ -206,7 +206,9 @@ void VesselProcessor::snapToCurrentState()
     resonator.snapModel (pc (res_model));
     voices.setMode (pc (voice_mode));   // before any note of the first block (a bounce starting on a note)
     voices.snapFilter (pb (flt_on));
-    ruin.snap (pb (tube_on), pb (bias_on));
+    const bool tubeActive = pb (tube_on) && (pv (tube_drive) > 1.0e-5f || std::abs (pv (tube_bias)) > 1.0e-5f || std::abs (pv (tube_out)) > 1.0e-4f);
+    const bool biasActive = pb (bias_on) && (pv (bias_sat) > 1.0e-5f || std::abs (pv (bias_amount)) > 1.0e-5f || pv (bias_sag) > 1.0e-5f);
+    ruin.snap (tubeActive, biasActive);
     outStage.snap (pb (exc_on), pb (clip_on));
 }
 
