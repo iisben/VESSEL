@@ -434,7 +434,13 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (v2_lpg_decay,     "LPG Ring",       Float,  0, 1, 0.45f, 0, 0, Pct, "") \
     F (v2_lpg_strike,    "LPG Strike",     Float,  0, 1, 0.65f, 0, 0, Pct, "") \
     F (v2_fb_filter,     "Filter Feedback",Float, -1, 1, 0.0f,  0, 0, Bip, "") \
-    F (v2_fb_fm,         "Filter to FM",   Float,  0, 1, 0.0f,  0, 0, Pct, "")
+    F (v2_fb_fm,         "Filter to FM",   Float,  0, 1, 0.0f,  0, 0, Pct, "") \
+    /* ── V2 Boutique Analog Realism: Polyphonic Power-Rail Sag & Phase Dispersion (append-only, Off/0% default) ── */ \
+    F (v2_rail_sag,      "Power Rail Sag", Float,  0, 1, 0.0f,    0, 0, Pct, "") \
+    F (v2_rail_time,     "Rail Recovery",  Float, 20, 80, 45.0f, 45, 0, Ms,  "") \
+    F (v2_disp_stages,   "Phase Disperse", Choice, 0, 5, 0,       0, 1, None, "Off|4 Stg|5 Stg|6 Stg|7 Stg|8 Stg") \
+    F (v2_disp_freq,     "Disperse Freq",  Float, 40, 2000, 180.0f, 220, 0, Hz, "") \
+    F (v2_disp_pinch,    "Disperse Pinch", Float,  0, 1, 0.50f,   0, 0, Pct, "")
 
 enum PID : int
 {

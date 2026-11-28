@@ -191,4 +191,187 @@ private:
     Svf f[2][4];
     Ramp vowelR, bodyR, shiftR, resR, mixR;
 };
+
+//==============================================================================
+/** Zero-gain-change cascaded 4-to-8-stage tunable all-pass phase dispersion network.
+    Uses 64-bit double Cytomic TPT/ZDF 2nd-order all-pass sections:
+      H_ap(s) = (s^2 - k*w0*s + w0^2) / (s^2 + k*w0*s + w0^2) = 1 - 2*k*H_bp(s)
+    Properties:
+    - Exact unity magnitude |H(e^{jw})| == 1.0 (0.000 dB ripple across 0..Nyquist)
+      for every stage count (4..8), frequency (40..2000 Hz), pinch/Q, and sample rate.
+    - Exact +1.0 DC gain (zero polarity flip, zero DC offset injection).
+    - Strictly phase-matched L & R coefficients preserve sub-120 Hz mono correlation
+      (0.000 deg inter-channel phase skew).
+    - Sample-rate invariant across 44.1-192 kHz, odd-block invariant, 0 added latency,
+      0 CPU when bypassed. */
+class PhaseDisperser
+{
+public:
+    static constexpr int kMaxStages = 8;
+
+    struct Params
+    {
+        bool  on     = false;
+        int   stages = 6;       // 4..8 cascaded 2nd-order TPT all-pass sections
+        float freqHz = 180.0f;  // dispersion pivot frequency (40..2000 Hz)
+        float pinch  = 0.50f;   // 0..1 group-delay pinch (Q = 0.50..2.80)
+    };
+
+    void prepare (double sampleRate) noexcept
+    {
+        sr = std::max (sampleRate, 1.0);
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        for (int c = 0; c < 2; ++c)
+            for (int s = 0; s < kMaxStages; ++s)
+                ic1[c][s] = ic2[c][s] = 0.0;
+        gCur = kCur = 0.0;
+        dg = dk = 0.0;
+        primed = false;
+        wasActive = false;
+        lastStages = 0;
+    }
+
+    int activeStages() const noexcept { return lastStages >= 4 ? lastStages : 6; }
+
+    void process (float* __restrict l, float* __restrict r, int n, const Params& p,
+                  bool isCtrlTick = true, int ctrlSpan = 0) noexcept
+    {
+        if (ctrlSpan <= 0) ctrlSpan = n;
+        const int numStages = std::clamp (p.stages, 4, kMaxStages);
+        if (! p.on)
+        {
+            if (wasActive) reset();
+            return;
+        }
+        wasActive = true;
+
+        if (numStages < lastStages)
+        {
+            for (int c = 0; c < 2; ++c)
+                for (int s = numStages; s < kMaxStages; ++s)
+                    ic1[c][s] = ic2[c][s] = 0.0;
+        }
+        lastStages = numStages;
+
+        if (isCtrlTick || ! primed)
+        {
+            const double fc = std::clamp ((double) p.freqHz, 20.0, 0.45 * sr);
+            const double pin = std::clamp ((double) p.pinch, 0.0, 1.0);
+            const double q = 0.50 + 2.30 * pin * pin;
+            const double gT = std::tan (kPiD * fc / sr);
+            const double kT = 1.0 / q;
+
+            if (! primed || (std::abs (gT - gCur) <= 1.0e-7 && std::abs (kT - kCur) <= 1.0e-6))
+            {
+                gCur = gT;
+                kCur = kT;
+                dg = 0.0;
+                dk = 0.0;
+                primed = true;
+            }
+            else
+            {
+                const double inv = 1.0 / (double) std::max (1, ctrlSpan);
+                dg = (gT - gCur) * inv;
+                dk = (kT - kCur) * inv;
+            }
+        }
+
+        double s1L[kMaxStages], s2L[kMaxStages], s1R[kMaxStages], s2R[kMaxStages];
+        for (int s = 0; s < numStages; ++s)
+        {
+            s1L[s] = ic1[0][s]; s2L[s] = ic2[0][s];
+            s1R[s] = ic1[1][s]; s2R[s] = ic2[1][s];
+        }
+
+        if (dg == 0.0 && dk == 0.0)
+        {
+            const double g = gCur;
+            const double k = kCur;
+            const double a1 = 1.0 / (1.0 + g * (g + k));
+            const double a2 = g * a1;
+            const double a3 = g * a2;
+            const double twoK = 2.0 * k;
+
+            for (int i = 0; i < n; ++i)
+            {
+                double xl = (double) l[i];
+                double xr = (double) r[i];
+                for (int s = 0; s < numStages; ++s)
+                {
+                    const double v3l = xl - s2L[s];
+                    const double v1l = a1 * s1L[s] + a2 * v3l;
+                    const double v2l = s2L[s] + a2 * s1L[s] + a3 * v3l;
+                    s1L[s] = 2.0 * v1l - s1L[s];
+                    s2L[s] = 2.0 * v2l - s2L[s];
+                    xl -= twoK * v1l;
+
+                    const double v3r = xr - s2R[s];
+                    const double v1r = a1 * s1R[s] + a2 * v3r;
+                    const double v2r = s2R[s] + a2 * s1R[s] + a3 * v3r;
+                    s1R[s] = 2.0 * v1r - s1R[s];
+                    s2R[s] = 2.0 * v2r - s2R[s];
+                    xr -= twoK * v1r;
+                }
+                l[i] = (float) xl;
+                r[i] = (float) xr;
+            }
+        }
+        else
+        {
+            double g = gCur, k = kCur;
+            for (int i = 0; i < n; ++i)
+            {
+                g = std::max (1.0e-6, g + dg);
+                k = std::max (0.20, k + dk);
+                const double a1 = 1.0 / (1.0 + g * (g + k));
+                const double a2 = g * a1;
+                const double a3 = g * a2;
+                const double twoK = 2.0 * k;
+
+                double xl = (double) l[i];
+                double xr = (double) r[i];
+                for (int s = 0; s < numStages; ++s)
+                {
+                    const double v3l = xl - s2L[s];
+                    const double v1l = a1 * s1L[s] + a2 * v3l;
+                    const double v2l = s2L[s] + a2 * s1L[s] + a3 * v3l;
+                    s1L[s] = 2.0 * v1l - s1L[s];
+                    s2L[s] = 2.0 * v2l - s2L[s];
+                    xl -= twoK * v1l;
+
+                    const double v3r = xr - s2R[s];
+                    const double v1r = a1 * s1R[s] + a2 * v3r;
+                    const double v2r = s2R[s] + a2 * s1R[s] + a3 * v3r;
+                    s1R[s] = 2.0 * v1r - s1R[s];
+                    s2R[s] = 2.0 * v2r - s2R[s];
+                    xr -= twoK * v1r;
+                }
+                l[i] = (float) xl;
+                r[i] = (float) xr;
+            }
+            gCur = g;
+            kCur = k;
+        }
+
+        for (int s = 0; s < numStages; ++s)
+        {
+            ic1[0][s] = flushDenormal (s1L[s]);
+            ic2[0][s] = flushDenormal (s2L[s]);
+            ic1[1][s] = flushDenormal (s1R[s]);
+            ic2[1][s] = flushDenormal (s2R[s]);
+        }
+    }
+
+private:
+    double sr = 48000.0;
+    double ic1[2][kMaxStages] {}, ic2[2][kMaxStages] {};
+    double gCur = 0.0, kCur = 0.0, dg = 0.0, dk = 0.0;
+    bool primed = false, wasActive = false;
+    int lastStages = 0;
+};
 } // namespace vessel::dsp

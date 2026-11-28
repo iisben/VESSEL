@@ -410,7 +410,7 @@ template <int L> struct LadderBank {
     drvSag[l] = 0.5 + 0.5 * driveT * isdT;
     if (snap || (std::abs(Gt - G[l]) <= 0.0006 * std::max(G[l], 1.0e-5) &&
                  std::abs(kt - k[l]) <= 0.002 &&
-                 std::abs(driveT - drv[l]) <= 1.0e-5)) {
+                 std::abs(driveT - drv[l]) <= 0.0005 * std::max(driveT, 1.0))) {
       G[l] = Gt;
       k[l] = kt;
       drv[l] = driveT;
@@ -1290,6 +1290,135 @@ template <int L> struct FeedbackBank {
   void holdLane(int l) noexcept { dFbG[l] = 0.0; }
 };
 
+//==============================================================================
+/** 64-bit shared virtual analog power-supply rail droop tracker (20-80 ms RC
+   reservoir time constant, running inside the existing 4x voice oversampling
+   loop with zero nested oversampling and zero added latency):
+    - Tracks uncompensated polyphonic bus current demand (stereo body + heavier
+      sub draw) through an asymmetric 64-bit RC reservoir capacitor model.
+    - Soft linear-regulator knee stays stiff on quiet solo notes and smoothly
+      sags on loud polyphonic chords, gluing voices together with coupled
+      headroom compression (-0..2.1 dB), micro-pitch droop (-1..3 cents),
+      and filter OTA bias modulation (-0..0.24 oct cutoff, -6% res, +12% drive).
+    - Sample-rate & odd-block invariant across 44.1-192 kHz; zero-overhead exact
+      bypass when sag == 0. */
+struct PowerRailSag {
+  static constexpr double kKnee = 0.46;        // soft regulator current knee
+  static constexpr double kMaxGainDrop = 0.22; // max headroom sag (~ -2.16 dB)
+  static constexpr double kMaxPitchSt = 0.026; // max shared droop = -2.6 ct (per-voice +/-15% -> -2.2..-3.0 ct)
+  static constexpr double kMaxCutOct = 0.24;   // max OTA bias cutoff darkening (-0.24 oct)
+  static constexpr double kMaxResDrop = 0.06;  // subtle resonance relaxation under rail droop
+  static constexpr double kMaxDriveAdd = 0.12; // subtle input-stage compression warmth
+
+  double osr = 192000.0;
+  double lastTimeMs = -1.0;
+  double aAtt = 0.00016, aRel = 0.000116, invTauRelOs = 0.000116;
+  double railPow = 0.0;
+  double droopCur = 0.0;
+  double gainCur = 1.0, dGain = 0.0;
+  bool active = false;
+
+  void prepare(double oversampledRate) noexcept {
+    osr = std::max(oversampledRate, 1.0);
+    lastTimeMs = -1.0;
+    setTimeMs(45.0);
+    reset();
+  }
+
+  void reset() noexcept {
+    railPow = 0.0;
+    droopCur = 0.0;
+    gainCur = 1.0;
+    dGain = 0.0;
+    active = false;
+  }
+
+  void setTimeMs(double timeMs) noexcept {
+    timeMs = std::clamp(timeMs, 20.0, 80.0);
+    if (std::abs(timeMs - lastTimeMs) <= 1.0e-4)
+      return;
+    lastTimeMs = timeMs;
+    const double tRel = timeMs * 0.001;
+    const double tAtt = 0.72 * tRel;
+    invTauRelOs = 1.0 / (tRel * osr);
+    aAtt = 1.0 - std::exp(-1.0 / (tAtt * osr));
+    aRel = 1.0 - std::exp(-invTauRelOs);
+  }
+
+  void beginControlBlock(double sagAmt, double timeMs, int ctrlSpanOs,
+                         double &outDroopEff) noexcept {
+    sagAmt = std::clamp(sagAmt, 0.0, 1.0);
+    if (sagAmt <= 1.0e-5 && !active) {
+      droopCur = 0.0;
+      gainCur = 1.0;
+      dGain = 0.0;
+      outDroopEff = 0.0;
+      return;
+    }
+    setTimeMs(timeMs);
+    railPow = flushDenormal(railPow);
+    if (railPow < 1.0e-12)
+      railPow = 0.0;
+    const double iRms = std::sqrt(std::max(0.0, railPow));
+    const double u = iRms / kKnee;
+    const double u2 = u * u;
+    droopCur = u2 / (1.0 + u2);
+    const double dEff = sagAmt * droopCur;
+    const double gainTarget = 1.0 - kMaxGainDrop * dEff;
+    const double invSpan = 1.0 / (double)std::max(1, ctrlSpanOs);
+    dGain = (gainTarget - gainCur) * invSpan;
+    if (sagAmt <= 1.0e-5 && railPow == 0.0 && std::abs(gainCur - 1.0) < 1.0e-6) {
+      reset();
+      outDroopEff = 0.0;
+      return;
+    }
+    active = true;
+    outDroopEff = dEff;
+  }
+
+  void processBus(float *__restrict bodyL, float *__restrict bodyR,
+                  float *__restrict sub, const float *__restrict pg,
+                  int n2) noexcept {
+    if (!active)
+      return;
+    double p = railPow;
+    double g = gainCur;
+    const double dg = dGain;
+    const double att = aAtt;
+    const double rel = aRel;
+    for (int i = 0; i < n2; ++i) {
+      g += dg;
+      const float gf = (float)g;
+      const float bl = bodyL[i] * gf;
+      const float br = bodyR[i] * gf;
+      const float sb = sub[i] * gf;
+      bodyL[i] = bl;
+      bodyR[i] = br;
+      sub[i] = sb;
+
+      const double pgD = std::max(0.125, (double)pg[i]);
+      const double invPgSq = 1.0 / (pgD * pgD);
+      const double pBus = (0.5 * ((double)bl * (double)bl + (double)br * (double)br) +
+                           1.4 * (double)sb * (double)sb) * invPgSq;
+      const double c = (pBus > p) ? att : rel;
+      p += c * (pBus - p);
+    }
+    railPow = flushDenormal(p);
+    gainCur = g;
+  }
+
+  void decaySilent(int nOs) noexcept {
+    if (!active || nOs <= 0)
+      return;
+    const double alpha = std::exp(-(double)nOs * invTauRelOs);
+    railPow = flushDenormal(railPow * alpha);
+    gainCur = 1.0 + alpha * (gainCur - 1.0);
+    dGain = 0.0;
+    if (railPow < 1.0e-12 && std::abs(gainCur - 1.0) < 1.0e-6)
+      reset();
+  }
+};
+
 struct VoiceParams {
   // sub (1)
   bool subOn = true;
@@ -1317,6 +1446,8 @@ struct VoiceParams {
   int lpgMode = 0;
   float lpgDecay = 0.45f, lpgStrike = 0.65f;
   float fbFilter = 0.0f, fbFm = 0.0f;
+  // V2 Polyphonic Power-Rail Sag (0% default)
+  float railSag = 0.0f, railTimeMs = 45.0f;
 };
 
 //==============================================================================
@@ -1350,6 +1481,12 @@ public:
     pwmPhase = rng.uni();
     cutTol = rng.bip() *
              0.035f; // deterministic ±3.5% analog filter component tolerance
+    // Deterministic per-voice PSU trace impedance sensitivity [0.85..1.15] (0 rng draws)
+    uint32_t rh = baseSeed * 2654435761u ^ 0x5A91C3E7u;
+    rh ^= rh << 13;
+    rh ^= rh >> 17;
+    rh ^= rh << 5;
+    railPitchSens = 0.85f + 0.30f * ((float)(rh >> 8) * (1.0f / 16777216.0f));
   }
 
   void reset() {
@@ -1376,6 +1513,7 @@ public:
     lpgMode = 0;
     vactrolStrikePending = false;
     curFbFmLive = false;
+    lastRailPitchSt = 0.0f;
     for (auto *r : {&sub1L,     &sub2L,      &sub1S,    &sub2S,    &weight,
                     &wtL,       &morph,      &pwBase,   &pwmDepth, &cutA,
                     &cutB,      &resA,       &resB,     &fDrive,   &envAmt,
@@ -1548,8 +1686,8 @@ public:
 
   /** Executed strictly on fixed control-tick boundaries (mCtrl = kSub = 32
    * oversampled samples). */
-  void beginControlBlock(int mCtrl, float &cA, float &rA, float &cB, float &rB,
-                         float &drive) noexcept {
+  void beginControlBlock(int mCtrl, float railDroopEff, float &cA, float &rA,
+                         float &cB, float &rB, float &drive) noexcept {
     glideM = (glideCoef > 0.0f) ? std::pow(glideCoef, (float)mCtrl) : 0.0f;
     currentNote = targetNote + glideM * (currentNote - targetNote);
     bend.skip(mCtrl);
@@ -1558,16 +1696,22 @@ public:
     const float hz = midiToHz(noteBent);
 
     // V1 smooth drift + V2 per-voice 1/f pink organic pitch micro-drift
-    // (sub-120 Hz bass-locked)
+    // (sub-120 Hz bass-locked) + shared polyphonic power-rail micro-pitch droop
     curDrift = drift.next(mCtrl) * driftAmt;
     const float orgWalk =
         organicAmt > 1.0e-5f ? organicDrift.next(mCtrl) : 0.0f;
     const float subLock = std::min(1.0f, (hz / 120.0f) * (hz / 120.0f));
     const float orgPitchSt = orgWalk * organicAmt * 0.12f * subLock;
+    const bool railActive = railDroopEff > 1.0e-6f;
+    lastRailPitchSt =
+        railActive ? -(float)PowerRailSag::kMaxPitchSt * railDroopEff * railPitchSens
+                   : 0.0f;
+    const float railSubMul = railActive ? semis(lastRailPitchSt) : 1.0f;
 
-    const float oscHz = hz * semis(wtTuneR.cur + curDrift * 0.18f + orgPitchSt);
+    const float oscHz =
+        hz * semis(wtTuneR.cur + curDrift * 0.18f + orgPitchSt + lastRailPitchSt);
     curDt = std::clamp((double)oscHz / (double)osr, 1.0e-7, 0.48);
-    curDSub = std::clamp(hz / (8.0f * osr), 0.0f, 0.48f);
+    curDSub = std::clamp((hz * railSubMul) / (8.0f * osr), 0.0f, 0.48f);
 
     const float pwmStart = pwmLfo;
     pwmPhase += pwmRate * (float)mCtrl / osr;
@@ -1622,9 +1766,11 @@ public:
     const float fenv = filtEnv.currentLevel();
     const float orgCutOct =
         organicAmt > 1.0e-5f ? organicAmt * (cutTol + 0.14f * orgWalk) : 0.0f;
+    const float railCutOct =
+        railActive ? -(float)PowerRailSag::kMaxCutOct * railDroopEff : 0.0f;
     const float octs = envAmt.cur * 7.0f * fenv +
                        keyTrack.cur * (noteBent - 60.0f) * (1.0f / 12.0f) +
-                       orgCutOct;
+                       orgCutOct + railCutOct;
     const float hi = 0.485f * sr;
     cA = std::clamp(fastExp2(cutA.cur + octs), 10.0f, hi);
     cB = std::clamp(fastExp2(cutB.cur + octs), 10.0f, hi);
@@ -1644,10 +1790,14 @@ public:
         vactrolVca.snap(ampEnv.currentLevel());
       }
     }
-    rA = clamp01(resA.cur);
-    rB = clamp01(resB.cur);
+    const float railResMul =
+        railActive ? (1.0f - (float)PowerRailSag::kMaxResDrop * railDroopEff) : 1.0f;
+    rA = clamp01(resA.cur) * railResMul;
+    rB = clamp01(resB.cur) * railResMul;
     const float dr = clamp01(fDrive.cur);
-    drive = 1.0f + 6.0f * dr * dr;
+    const float railDrvMul =
+        railActive ? (1.0f + (float)PowerRailSag::kMaxDriveAdd * railDroopEff) : 1.0f;
+    drive = (1.0f + 6.0f * dr * dr) * railDrvMul;
   }
 
   bool isFbFmActive() const noexcept { return curFbFmLive; }
@@ -1712,9 +1862,12 @@ public:
           targetNote = currentNote = (float)pendingNote;
           noteBent = currentNote + bend.cur;
           const float hzNew = midiToHz(noteBent);
-          const float oscHzNew = hzNew * semis(wtTuneR.cur + curDrift * 0.18f);
+          const float oscHzNew =
+              hzNew * semis(wtTuneR.cur + curDrift * 0.18f + lastRailPitchSt);
+          const float railSubNew =
+              lastRailPitchSt != 0.0f ? semis(lastRailPitchSt) : 1.0f;
           curDt = std::clamp((double)oscHzNew / (double)osr, 1.0e-7, 0.48);
-          curDSub = std::clamp(hzNew / (8.0f * osr), 0.0f, 0.48f);
+          curDSub = std::clamp((hzNew * railSubNew) / (8.0f * osr), 0.0f, 0.48f);
           curFmDt = std::min(0.45, curDt * (double)fmRatio);
           fs.stealAt = i;
           fs.dtAfterSteal = curDt;
@@ -1867,9 +2020,12 @@ public:
           targetNote = currentNote = (float)pendingNote;
           noteBent = currentNote + bend.cur;
           const float hzNew = midiToHz(noteBent);
-          const float oscHzNew = hzNew * semis(wtTuneR.cur + curDrift * 0.18f);
+          const float oscHzNew =
+              hzNew * semis(wtTuneR.cur + curDrift * 0.18f + lastRailPitchSt);
+          const float railSubNew =
+              lastRailPitchSt != 0.0f ? semis(lastRailPitchSt) : 1.0f;
           curDt = std::clamp((double)oscHzNew / (double)osr, 1.0e-7, 0.48);
-          curDSub = std::clamp(hzNew / (8.0f * osr), 0.0f, 0.48f);
+          curDSub = std::clamp((hzNew * railSubNew) / (8.0f * osr), 0.0f, 0.48f);
           curFmDt = std::min(0.45, curDt * (double)fmRatio);
           subPhase = 0.0;
           wt.phase = 0.0;
@@ -1999,6 +2155,7 @@ private:
   float glideCoef = 0.0f, glideM = 0.0f, pwmRate = 0.35f, driftAmt = 0.25f,
         organicAmt = 0.0f, wtTune = 0.0f;
   float curDrift = 0.0f, curDSub = 0.0f, curWLower = 0.0f, velAmpLast = 0.65f;
+  float railPitchSens = 1.0f, lastRailPitchSt = 0.0f;
   int curMip = 0, s1Mul = 4, s2Mul = 2, lpgMode = 0;
   bool curFmLive = false, curFbFmLive = false, vactrolStrikePending = false;
   Ramp sub1L, sub2L, sub1S, sub2S, weight, wtL, morph, pwBase, pwmDepth;
@@ -2037,6 +2194,8 @@ public:
     ladA.setSampleRate((double)osr);
     ladB.setSampleRate((double)osr);
     fbBank.setSampleRate((double)osr);
+    railSag.prepare((double)osr);
+    lastRailDroop = 0.0;
     for (int i = 0; i < kVoices; ++i) {
       voices[(size_t)i].prepare(baseSr, (float)kOs, (uint32_t)(i * 7717 + 101));
       lastCutA[i] = lastCutB[i] = -1.0f;
@@ -2052,6 +2211,8 @@ public:
   void reseed(uint32_t seedVal) noexcept {
     for (int i = 0; i < kVoices; ++i)
       voices[(size_t)i].reseed(seedVal ^ (uint32_t)(i * 7717 + 101));
+    railSag.reset();
+    lastRailDroop = 0.0;
   }
 
   void allOff() {
@@ -2064,10 +2225,17 @@ public:
       lastCutA[v] = lastCutB[v] = -1.0f;
     }
     fbWasActive = false;
+    railSag.reset();
+    lastRailDroop = 0.0;
     polySmooth.snap(1.0f);
     stackSize = 0;
     sustain = false;
     std::fill(std::begin(sustained), std::end(sustained), false);
+  }
+
+  void tickIdle(int nOs) noexcept {
+    railSag.decaySilent(nOs);
+    lastRailDroop = 0.0;
   }
 
   void setTable(const WavetableBank *b) noexcept {
@@ -2147,6 +2315,10 @@ public:
   void renderSlice(float *bodyL, float *bodyR, float *sub, int n2,
                    const std::array<VoiceParams, kVoices> &vp, bool fltOn,
                    int route, bool isCtrlTick, int ctrlSpanOs = kSub) {
+    if (isCtrlTick) {
+      railSag.beginControlBlock((double)vp[0].railSag, (double)vp[0].railTimeMs,
+                                ctrlSpanOs, lastRailDroop);
+    }
     uint32_t activeMask = 0u;
     float envSum = 0.0f;
     bool anyLpgFilter = false;
@@ -2169,7 +2341,8 @@ public:
         const bool wasFresh = voice.isFresh();
         voice.control(vp[(size_t)v], ctrlSpanOs);
         float cA, rA, cB, rB, drive;
-        voice.beginControlBlock(ctrlSpanOs, cA, rA, cB, rB, drive);
+        voice.beginControlBlock(ctrlSpanOs, (float)lastRailDroop, cA, rA, cB,
+                                rB, drive);
         const bool snap = voice.ladderSnap || wasFresh;
         if (snap) {
           ladA.resetLane(v);
@@ -2209,6 +2382,8 @@ public:
     if (activeMask == 0u) {
       fltFade.snap(fltEffOn);
       polySmooth.snap(1.0f);
+      railSag.decaySilent(n2);
+      lastRailDroop = 0.0;
       return;
     }
 
@@ -2459,6 +2634,9 @@ public:
     for (int i = 0; i < n2; ++i)
       sub[i] *= pg[i];
 
+    // Shared virtual analog power-rail droop (exact per-sample RC integration + headroom glue)
+    railSag.processBus(bodyL, bodyR, sub, pg, n2);
+
     const uint32_t baseSamples = (uint32_t)std::max(1, n2 / kOs);
     for (int v = 0; v < kVoices; ++v)
       if ((activeMask & (1u << v)) != 0u)
@@ -2541,6 +2719,8 @@ private:
   std::array<Voice, kVoices> voices;
   LadderBank<kVoices> ladA, ladB;
   FeedbackBank<kVoices> fbBank;
+  PowerRailSag railSag;
+  double lastRailDroop = 0.0;
   bool fbWasActive = false;
   float lastCutA[kVoices]{}, lastCutB[kVoices]{};
   double cachedGA[kVoices]{}, cachedGB[kVoices]{};

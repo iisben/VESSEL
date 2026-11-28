@@ -1290,10 +1290,445 @@ GateResult runGate4()
                            + " dBc (lim<-75), DC=" + fmt (fbWorstDc, 1) + " dBFS (lim<-90), oddRes=" + fmt (fbOddResDb, 1)
                            + " dBFS [" + (fbOk ? "OK" : "FAIL") + "]");
 
+    // Part G: Polyphonic Power-Rail Sag (20-80 ms RC across 44.1-192 kHz, headroom + micro-pitch (-1..-3 ct)
+    // + filter bias chord glue, C6/6kHz aliasing < -75 dBc, DC < -90 dBFS, 0 added latency, odd-block < -100 dBFS)
+    bool railOk = true;
+    double railWorstAlias = -300.0, railWorstDc = -300.0, railRcErrMs = 0.0;
+    double railChordDb = 0.0, railPitchCt = 0.0, railCentDrop = 1.0, railOddResDb = -300.0;
+    {
+        // 1) Multi-rate RC time constant invariance (20 ms & 80 ms) across 44.1, 48, 96, 192 kHz
+        for (double rSr : { 44100.0, 48000.0, 96000.0, 192000.0 })
+        {
+            const double osr = 4.0 * rSr;
+            for (double targetMs : { 20.0, 80.0 })
+            {
+                dsp::PowerRailSag rs;
+                rs.prepare (osr);
+                double droopEff = 0.0;
+                // Charge rail to steady power, then measure 1/e RC recovery time constant
+                std::vector<float> bL (32, 0.5f), bR (32, 0.5f), sB (32, 0.4f), pg (32, 0.5f);
+                for (int k = 0; k < (int) std::ceil (0.4 * osr / 32.0); ++k)
+                {
+                    std::fill (bL.begin(), bL.end(), 0.5f);
+                    std::fill (bR.begin(), bR.end(), 0.5f);
+                    std::fill (sB.begin(), sB.end(), 0.4f);
+                    rs.beginControlBlock (1.0, targetMs, 32, droopEff);
+                    rs.processBus (bL.data(), bR.data(), sB.data(), pg.data(), 32);
+                }
+                const double p0 = rs.railPow;
+                if (! std::isfinite (p0) || p0 <= 0.1) railOk = false;
+                const double targetPow = p0 * std::exp (-1.0);
+                int recSamples = 0;
+                const int maxSamples = (int) (0.25 * osr);
+                std::fill (bL.begin(), bL.end(), 0.0f);
+                std::fill (bR.begin(), bR.end(), 0.0f);
+                std::fill (sB.begin(), sB.end(), 0.0f);
+                while (recSamples < maxSamples && rs.railPow > targetPow)
+                {
+                    rs.beginControlBlock (1.0, targetMs, 32, droopEff);
+                    rs.processBus (bL.data(), bR.data(), sB.data(), pg.data(), 32);
+                    recSamples += 32;
+                }
+                const double measMs = (double) recSamples * 1000.0 / osr;
+                railRcErrMs = std::max (railRcErrMs, std::abs (measMs - targetMs));
+                if (std::abs (measMs - targetMs) > 2.5) railOk = false;
+            }
+        }
+
+        // 2) Chord vs solo headroom glue & filter bias darkening at 48 kHz
+        auto renderRailChord = [&] (float sag, bool withFilter, bool loudChord)
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, sub_on, 1.0f);
+            setP (*p, sub1_level, 0.8f);
+            setP (*p, sub2_level, 0.45f);
+            setP (*p, wt_level, 0.65f);
+            setP (*p, wt_morph, 2.0f / 7.0f);
+            setP (*p, vel_amp, 0.9f);
+            setP (*p, flt_on, withFilter ? 1.0f : 0.0f);
+            setP (*p, flt_route, 2.0f);
+            setP (*p, flt_a_cut, 1400.0f);
+            setP (*p, flt_a_res, 0.45f);
+            setP (*p, flt_env, 0.0f);
+            setP (*p, v2_rail_sag, sag);
+            setP (*p, v2_rail_time, 45.0f);
+            p->prepareToPlay (sr, 512);
+            if (p->getLatencySamples() != 0) railOk = false;
+            std::vector<MidiEvent> ev;
+            if (loudChord)
+            {
+                for (int n : { 36, 40, 43, 48, 52, 55 })
+                    ev.push_back ({ 0, juce::MidiMessage::noteOn (1, n, 0.95f) });
+            }
+            else
+            {
+                ev.push_back ({ 0, juce::MidiMessage::noteOn (1, 48, 0.25f) });
+            }
+            return renderEvents (*p, sr, (int) (0.75 * sr), { 512 }, ev);
+        };
+        auto rmsTailDb = [&] (const RenderBuf& rb)
+        {
+            double sq = 0.0;
+            const size_t st = (size_t) (0.25 * sr);
+            for (size_t i = st; i < rb.l.size(); ++i)
+                sq += 0.5 * ((double) rb.l[i] * rb.l[i] + (double) rb.r[i] * rb.r[i]);
+            return linToDb (std::sqrt (sq / (double) (rb.l.size() - st)));
+        };
+        auto centTail = [&] (const RenderBuf& rb)
+        {
+            constexpr int ord = 14;
+            const int N = 1 << ord;
+            auto sp = bhSpectrumPow (rb.l, rb.l.size() - (size_t) N, ord);
+            const double binHz = sr / (double) N;
+            double num = 0.0, den = 0.0;
+            for (int k = 1; k < N / 2; ++k) { const double m = std::sqrt (sp[(size_t) k]); num += ((double) k * binHz) * m; den += m; }
+            return den > 1.0e-12 ? num / den : 0.0;
+        };
+
+        auto rChordDry = renderRailChord (0.0f, true, true);
+        auto rChordSag = renderRailChord (1.0f, true, true);
+        auto rSoloDry  = renderRailChord (0.0f, true, false);
+        auto rSoloSag  = renderRailChord (1.0f, true, false);
+        if (rChordSag.nonFiniteCount > 0 || rSoloSag.nonFiniteCount > 0) railOk = false;
+        railChordDb = rmsTailDb (rChordDry) - rmsTailDb (rChordSag);
+        const double soloDropDb = rmsTailDb (rSoloDry) - rmsTailDb (rSoloSag);
+        const double cDry = centTail (rChordDry), cSag = centTail (rChordSag);
+        railCentDrop = (cDry > 1.0) ? (cSag / cDry) : 1.0;
+        if (railChordDb < 0.45 || railChordDb > 2.6 || railChordDb < soloDropDb + 0.35 || railCentDrop > 0.975)
+            railOk = false;
+
+        // 3) Micro-pitch droop (-1..-3 cents) on an isolated B4 sine voice inside a loud low chord
+        auto measureChordPitchHz = [&] (float sag)
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, sub_on, 1.0f);
+            setP (*p, sub1_oct, 0.0f);
+            setP (*p, sub1_level, 0.85f);
+            setP (*p, sub2_level, 0.0f);
+            setP (*p, sub1_shape, 0.0f);
+            setP (*p, wt_morph, 0.0f);   // pure sine
+            setP (*p, wt_level, 0.70f);
+            setP (*p, flt_on, 0.0f);
+            setP (*p, v2_rail_sag, sag);
+            setP (*p, v2_rail_time, 45.0f);
+            p->prepareToPlay (sr, 512);
+            std::vector<MidiEvent> ev;
+            for (int n : { 36, 40, 43, 48, 71 })   // low chord + isolated B4 (493.88 Hz)
+                ev.push_back ({ 0, juce::MidiMessage::noteOn (1, n, 0.95f) });
+            const int nTot = (int) (1.7 * sr);
+            auto r = renderEvents (*p, sr, nTot, { 512 }, ev);
+            if (r.nonFiniteCount > 0) railOk = false;
+            constexpr int ord = 16;
+            const int N = 1 << ord;
+            auto sp = bhSpectrumPow (r.l, r.l.size() - (size_t) N, ord);
+            const double binHz = sr / (double) N;
+            const int k0 = std::max (1, (int) std::floor (470.0 / binHz));
+            const int k1 = std::min (N / 2 - 2, (int) std::ceil (520.0 / binHz));
+            int bestK = k0;
+            double bestP = -1.0;
+            for (int k = k0; k <= k1; ++k) if (sp[(size_t) k] > bestP) { bestP = sp[(size_t) k]; bestK = k; }
+            const double pL = std::log (std::max (sp[(size_t) (bestK - 1)], 1.0e-30));
+            const double pC = std::log (std::max (sp[(size_t) bestK],       1.0e-30));
+            const double pR = std::log (std::max (sp[(size_t) (bestK + 1)], 1.0e-30));
+            const double den = (pL - 2.0 * pC + pR);
+            const double del = std::abs (den) > 1.0e-12 ? 0.5 * (pL - pR) / den : 0.0;
+            return ((double) bestK + std::clamp (del, -0.5, 0.5)) * binHz;
+        };
+        const double fDry = measureChordPitchHz (0.0f);
+        const double fSag = measureChordPitchHz (1.0f);
+        railPitchCt = 1200.0 * std::log2 (std::max (fSag, 1.0) / std::max (fDry, 1.0));
+        if (railPitchCt > -0.7 || railPitchCt < -3.3) railOk = false;
+
+        // 4) Aliasing (< -75 dBc) & DC (< -90 dBFS) at C6 saw & ~6 kHz sine with rail sag active
+        const int totalR = (int) (1.6 * sr);
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, wt_level, 0.65f);
+            setP (*p, wt_morph, kind == 0 ? (2.0f / 7.0f) : 0.0f);
+            setP (*p, flt_on, 1.0f);
+            setP (*p, flt_route, 2.0f);
+            setP (*p, flt_a_cut, kind == 0 ? 6000.0f : 12000.0f);
+            setP (*p, flt_a_res, 0.45f);
+            setP (*p, flt_drive, 0.45f);
+            setP (*p, flt_env, 0.0f);
+            setP (*p, v2_rail_sag, 1.0f);
+            setP (*p, v2_rail_time, 35.0f);
+            p->prepareToPlay (sr, 512);
+            const int midi = kind == 0 ? 84 : 114;
+            auto r = renderEvents (*p, sr, totalR, { 512 }, { { 0, juce::MidiMessage::noteOn (1, midi, 1.0f) } });
+            if (r.nonFiniteCount > 0) railOk = false;
+            const double fNom = midiToHzD (midi);
+            const double fAct = estimatePitchHz (r.l, sr);
+            if (std::abs (1200.0 * std::log2 (std::max (fAct, 1.0) / fNom)) > 3.5) railOk = false;
+            const auto am = measureHarmonicAliasing (r.l, sr, fAct);
+            railWorstAlias = std::max (railWorstAlias, am.aliasedDbc);
+            railWorstDc = std::max (railWorstDc, am.dcDbfs);
+        }
+        if (railWorstAlias >= -75.0 || railWorstDc >= -90.0) railOk = false;
+
+        // 5) Odd-block invariance with Power-Rail Sag active
+        auto setupRailOdd = [] (VesselProcessor& p)
+        {
+            setCleanDryPatch (p);
+            setP (p, sub_on, 1.0f);
+            setP (p, flt_on, 1.0f);
+            setP (p, flt_a_cut, 1600.0f);
+            setP (p, v2_rail_sag, 1.0f);
+            setP (p, v2_rail_time, 30.0f);
+            maybeSeedQa (p, 0x5A610001u);
+        };
+        const int nOdd = (int) (0.5 * sr);
+        const std::vector<MidiEvent> evOdd {
+            { 0,     juce::MidiMessage::noteOn (1, 40, 0.9f) },
+            { 0,     juce::MidiMessage::noteOn (1, 47, 0.9f) },
+            { 4000,  juce::MidiMessage::noteOn (1, 52, 0.9f) },
+            { 14000, juce::MidiMessage::noteOff (1, 40) },
+            { 14000, juce::MidiMessage::noteOff (1, 47) },
+        };
+        auto pR = makeProcessor (sr, 512); setupRailOdd (*pR); pR->prepareToPlay (sr, 512); maybeSeedQa (*pR, 0x5A610001u);
+        auto rR = renderEvents (*pR, sr, nOdd, { 512 }, evOdd);
+        auto pO = makeProcessor (sr, 2048); setupRailOdd (*pO); pO->prepareToPlay (sr, 2048); maybeSeedQa (*pO, 0x5A610001u);
+        auto rO = renderEvents (*pO, sr, nOdd, { 0, 1, 7, 13, 64, 137, 2048 }, evOdd);
+        double dSq = 0.0;
+        for (int i = 0; i < nOdd; ++i)
+        {
+            const double dl = (double) rR.l[(size_t) i] - (double) rO.l[(size_t) i];
+            const double dr = (double) rR.r[(size_t) i] - (double) rO.r[(size_t) i];
+            dSq += 0.5 * (dl * dl + dr * dr);
+        }
+        railOddResDb = linToDb (std::sqrt (dSq / (double) nOdd));
+        if (rO.nonFiniteCount > 0 || railOddResDb >= -100.0) railOk = false;
+    }
+    if (! railOk) res.status = GateStatus::Fail;
+    res.details.push_back ("Poly Power-Rail Sag (20..80ms, 44.1..192k): rcErr=" + fmt (railRcErrMs, 2) + "ms, sag="
+                           + fmt (railChordDb, 2) + "dB, pitch=" + fmt (railPitchCt, 2) + "ct, centMul="
+                           + fmt (railCentDrop, 3) + ", alias=" + fmt (railWorstAlias, 1) + "dBc, DC="
+                           + fmt (railWorstDc, 1) + "dBFS, oddRes=" + fmt (railOddResDb, 1) + "dBFS [" + (railOk ? "OK" : "FAIL") + "]");
+
+    // Part H: Voice/Bus 4-to-8-Stage 64-bit TPT All-Pass Phase Dispersion (0 dB gain change across 0..Nyquist,
+    // real bass transient dispersion, sub-120 Hz mono correlation, 44.1..192 kHz, C6/6kHz aliasing < -75 dBc,
+    // DC < -90 dBFS, 0 added latency, odd-block < -100 dBFS)
+    bool dispOk = true;
+    double dispMaxMagErrDb = 0.0, dispBassPkRatio = 1.0, dispBassDelayMs = 0.0, dispSub120Corr = 1.0;
+    double dispWorstAlias = -300.0, dispWorstDc = -300.0, dispOddResDb = -300.0;
+    {
+        // 1) Exact zero-gain-change & subterranean bass transient dispersion across 4, 6, 8 stages and 44.1..192 kHz
+        for (double rSr : { 44100.0, 48000.0, 96000.0, 192000.0 })
+        {
+            double prevPeak = 1.0;
+            for (int stg : { 4, 6, 8 })
+            {
+                constexpr int ord = 14;
+                const int N = 1 << ord;   // 16384 samples (full impulse decay < -150 dBFS)
+                std::vector<float> l ((size_t) N, 0.0f), r ((size_t) N, 0.0f);
+                l[0] = r[0] = 1.0f;
+                dsp::PhaseDisperser pd;
+                pd.prepare (rSr);
+                dsp::PhaseDisperser::Params prm { true, stg, 180.0f, 0.75f };
+                for (int pos = 0; pos < N; pos += 64)
+                    pd.process (l.data() + pos, r.data() + pos, std::min (64, N - pos), prm, true, 64);
+
+                double eng = 0.0, pk = 0.0;
+                for (int i = 0; i < N; ++i)
+                {
+                    if (! std::isfinite (l[(size_t) i]) || ! std::isfinite (r[(size_t) i])) dispOk = false;
+                    eng += (double) l[(size_t) i] * (double) l[(size_t) i];
+                    pk = std::max (pk, (double) std::abs (l[(size_t) i]));
+                }
+                if (std::abs (eng - 1.0) > 1.0e-3) dispOk = false;
+                if (std::abs (rSr - 48000.0) < 1.0)
+                {
+                    if (pk >= prevPeak) dispOk = false;
+                    prevPeak = pk;
+                }
+
+                // Exact unwindowed DFT magnitude of impulse response = |H(e^{jw})|
+                juce::dsp::FFT fft (ord);
+                std::vector<float> fb ((size_t) N * 2, 0.0f);
+                std::copy_n (l.data(), N, fb.data());
+                fft.performFrequencyOnlyForwardTransform (fb.data());
+                const double binHz = rSr / (double) N;
+                const double hiHz = std::min (18000.0, 0.45 * rSr);
+                for (int k = 1; k < N / 2; ++k)
+                {
+                    const double f = (double) k * binHz;
+                    if (f < 30.0 || f > hiHz) continue;
+                    const double errDb = std::abs (linToDb ((double) fb[(size_t) k]));
+                    dispMaxMagErrDb = std::max (dispMaxMagErrDb, errDb);
+                }
+            }
+
+            // Subterranean bass transient (< 400 Hz) dispersion check at 48 kHz: verifies dramatic peak spread & group delay
+            if (std::abs (rSr - 48000.0) < 1.0)
+            {
+                const int N = 8192;
+                std::vector<float> dry ((size_t) N, 0.0f), wetL ((size_t) N, 0.0f), wetR ((size_t) N, 0.0f);
+                dsp::Svf lp1, lp2;
+                lp1.setup (350.0, 0.70710678, rSr);
+                lp2.setup (350.0, 0.70710678, rSr);
+                double dryPk = 0.0, dryEng = 0.0, dryT = 0.0;
+                for (int i = 0; i < N; ++i)
+                {
+                    const float x = lp2.lowpass (lp1.lowpass (i == 0 ? 1.0f : 0.0f));
+                    dry[(size_t) i] = wetL[(size_t) i] = wetR[(size_t) i] = x;
+                    dryPk = std::max (dryPk, (double) std::abs (x));
+                    dryEng += (double) x * x;
+                    dryT += (double) i * ((double) x * x);
+                }
+                dsp::PhaseDisperser pdB;
+                pdB.prepare (rSr);
+                dsp::PhaseDisperser::Params prm { true, 8, 180.0f, 0.75f };
+                for (int pos = 0; pos < N; pos += 64)
+                    pdB.process (wetL.data() + pos, wetR.data() + pos, std::min (64, N - pos), prm, true, 64);
+                double wetPk = 0.0, wetEng = 0.0, wetT = 0.0;
+                for (int i = 0; i < N; ++i)
+                {
+                    wetPk = std::max (wetPk, (double) std::abs (wetL[(size_t) i]));
+                    wetEng += (double) wetL[(size_t) i] * wetL[(size_t) i];
+                    wetT += (double) i * ((double) wetL[(size_t) i] * wetL[(size_t) i]);
+                }
+                dispBassPkRatio = wetPk / std::max (dryPk, 1.0e-12);
+                dispBassDelayMs = ((wetT / std::max (wetEng, 1.0e-30)) - (dryT / std::max (dryEng, 1.0e-30))) * 1000.0 / rSr;
+                if (std::abs (wetEng - dryEng) / std::max (dryEng, 1.0e-30) > 0.005 || dispBassPkRatio > 0.60 || dispBassDelayMs < 8.0)
+                    dispOk = false;
+            }
+
+            // Fast modulation stability across 44.1..192 kHz (1 kHz freq & pinch sweep)
+            dsp::PhaseDisperser pdMod;
+            pdMod.prepare (rSr);
+            const int nMod = (int) (0.25 * rSr);
+            for (int pos = 0; pos < nMod; pos += 64)
+            {
+                const int m = std::min (64, nMod - pos);
+                float bl[64], br[64];
+                for (int i = 0; i < m; ++i)
+                {
+                    const double t = (double) (pos + i) / rSr;
+                    bl[i] = br[i] = 0.5f * (float) std::sin (kTwoPiD * 110.0 * t);
+                }
+                const double u = 0.5 + 0.5 * std::sin (kTwoPiD * 1000.0 * (double) pos / rSr);
+                dsp::PhaseDisperser::Params mp { true, 8, (float) (40.0 + 1960.0 * u), (float) u };
+                pdMod.process (bl, br, m, mp, true, 64);
+                for (int i = 0; i < m; ++i)
+                    if (! std::isfinite (bl[i]) || ! std::isfinite (br[i]) || std::abs (bl[i]) > 10.0f) dispOk = false;
+            }
+        }
+        if (dispMaxMagErrDb > 0.02) dispOk = false;
+
+        // 2) Sub-120 Hz mono correlation on subterranean bass chord (even with mono_on = 0!)
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, sub_on, 1.0f);
+            setP (*p, sub1_level, 0.85f);
+            setP (*p, sub2_level, 0.50f);
+            setP (*p, wt_level, 0.60f);
+            setP (*p, wt_drift, 0.25f);
+            setP (*p, flt_on, 1.0f);
+            setP (*p, flt_a_cut, 900.0f);
+            setP (*p, mono_on, 0.0f);
+            setP (*p, v2_disp_stages, 5.0f);   // 8 stages
+            setP (*p, v2_disp_freq, 140.0f);
+            setP (*p, v2_disp_pinch, 0.75f);
+            p->prepareToPlay (sr, 512);
+            if (p->getLatencySamples() != 0) dispOk = false;
+            const int totalD = (int) (1.0 * sr);
+            auto r = renderEvents (*p, sr, totalD, { 512 }, {
+                { 0, juce::MidiMessage::noteOn (1, 36, 0.95f) },
+                { 0, juce::MidiMessage::noteOn (1, 43, 0.85f) },
+            });
+            if (r.nonFiniteCount > 0) dispOk = false;
+            dsp::Svf lpL1, lpL2, lpR1, lpR2;
+            lpL1.setup (120.0, 0.70710678, sr); lpL2.setup (120.0, 0.70710678, sr);
+            lpR1.setup (120.0, 0.70710678, sr); lpR2.setup (120.0, 0.70710678, sr);
+            double sLL = 0.0, sRR = 0.0, sLR = 0.0;
+            for (int i = 0; i < totalD; ++i)
+            {
+                const double sl = (double) lpL2.lowpass (lpL1.lowpass (r.l[(size_t) i]));
+                const double srS = (double) lpR2.lowpass (lpR1.lowpass (r.r[(size_t) i]));
+                sLL += sl * sl; sRR += srS * srS; sLR += sl * srS;
+            }
+            dispSub120Corr = sLR / std::sqrt (sLL * sRR + 1.0e-30);
+            if (dispSub120Corr < 0.995) dispOk = false;
+        }
+
+        // 3) Aliasing (< -75 dBc) & DC (< -90 dBFS) at C6 saw & ~6 kHz sine with 8-stage dispersion active
+        const int totalD = (int) (1.6 * sr);
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, wt_level, 0.65f);
+            setP (*p, wt_morph, kind == 0 ? (2.0f / 7.0f) : 0.0f);
+            setP (*p, v2_disp_stages, 5.0f);   // 8 stages
+            setP (*p, v2_disp_freq, 220.0f);
+            setP (*p, v2_disp_pinch, 0.80f);
+            p->prepareToPlay (sr, 512);
+            if (p->getLatencySamples() != 0) dispOk = false;
+            const int midi = kind == 0 ? 84 : 114;
+            auto r = renderEvents (*p, sr, totalD, { 512 }, { { 0, juce::MidiMessage::noteOn (1, midi, 1.0f) } });
+            if (r.nonFiniteCount > 0) dispOk = false;
+            const auto am = measureHarmonicAliasing (r.l, sr, midiToHzD (midi));
+            dispWorstAlias = std::max (dispWorstAlias, am.aliasedDbc);
+            dispWorstDc = std::max (dispWorstDc, am.dcDbfs);
+        }
+        if (dispWorstAlias >= -75.0 || dispWorstDc >= -90.0) dispOk = false;
+
+        // 4) Odd-block invariance with Power-Rail Sag + 8-Stage Dispersion + LFO modulating Disperse Freq
+        auto setupDispOdd = [] (VesselProcessor& p)
+        {
+            setCleanDryPatch (p);
+            setP (p, sub_on, 1.0f);
+            setP (p, flt_on, 1.0f);
+            setP (p, flt_a_cut, 1800.0f);
+            setP (p, v2_rail_sag, 0.85f);
+            setP (p, v2_rail_time, 45.0f);
+            setP (p, v2_disp_stages, 5.0f);
+            setP (p, v2_disp_freq, 180.0f);
+            setP (p, v2_disp_pinch, 0.70f);
+            setP (p, lfo1_shape, 0.0f);
+            setP (p, lfo1_rate, 3.0f);
+            setP (p, lfo1_dest1, (float) destIndexOf (v2_disp_freq));
+            setP (p, lfo1_amt1, 0.30f);
+            maybeSeedQa (p, 0xD1590001u);
+        };
+        const int nOdd = (int) (0.5 * sr);
+        const std::vector<MidiEvent> evOdd {
+            { 0,     juce::MidiMessage::noteOn (1, 36, 0.9f) },
+            { 4000,  juce::MidiMessage::noteOn (1, 48, 0.85f) },
+            { 14000, juce::MidiMessage::noteOff (1, 36) },
+        };
+        auto pR = makeProcessor (sr, 512); setupDispOdd (*pR); pR->prepareToPlay (sr, 512); maybeSeedQa (*pR, 0xD1590001u);
+        auto rR = renderEvents (*pR, sr, nOdd, { 512 }, evOdd);
+        auto pO = makeProcessor (sr, 2048); setupDispOdd (*pO); pO->prepareToPlay (sr, 2048); maybeSeedQa (*pO, 0xD1590001u);
+        auto rO = renderEvents (*pO, sr, nOdd, { 0, 1, 7, 13, 64, 137, 2048 }, evOdd);
+        double dSq = 0.0;
+        for (int i = 0; i < nOdd; ++i)
+        {
+            const double dl = (double) rR.l[(size_t) i] - (double) rO.l[(size_t) i];
+            const double dr = (double) rR.r[(size_t) i] - (double) rO.r[(size_t) i];
+            dSq += 0.5 * (dl * dl + dr * dr);
+        }
+        dispOddResDb = linToDb (std::sqrt (dSq / (double) nOdd));
+        if (rO.nonFiniteCount > 0 || dispOddResDb >= -100.0) dispOk = false;
+    }
+    if (! dispOk) res.status = GateStatus::Fail;
+    res.details.push_back ("All-Pass Phase Dispersion (4..8 stg, 44.1..192k): magErr=" + fmt (dispMaxMagErrDb, 4)
+                           + "dB, bassPk=" + fmt (dispBassPkRatio, 2) + "x, bassDelay=" + fmt (dispBassDelayMs, 1)
+                           + "ms, sub120Corr=" + fmt (dispSub120Corr, 4) + ", alias=" + fmt (dispWorstAlias, 1)
+                           + "dBc, DC=" + fmt (dispWorstDc, 1) + "dBFS, oddRes=" + fmt (dispOddResDb, 1)
+                           + "dBFS [" + (dispOk ? "OK" : "FAIL") + "]");
+
+    const double worstAllAlias = std::max ({ worstFltAlias, fbWorstAlias, railWorstAlias, dispWorstAlias });
+    const double worstAllDc    = std::max ({ worstFltDc, fbWorstDc, railWorstDc, dispWorstDc });
     res.summary = "modStab=" + std::string (stabOk ? "OK" : "FAIL")
                 + ", SVF=" + fmt (maxSvfCents, 2) + "ct, Lad=" + fmt (maxLadCents, 2)
                 + "ct, SK=" + fmt (maxSkCents, 2) + "ct, rateDiff=" + fmt (maxLadRateDiffDb, 3)
-                + "dB, nlAlias=" + fmt (std::max (worstFltAlias, fbWorstAlias), 1) + "dBc, DC=" + fmt (std::max (worstFltDc, fbWorstDc), 1) + "dBFS";
+                + "dB, nlAlias=" + fmt (worstAllAlias, 1) + "dBc, DC=" + fmt (worstAllDc, 1) + "dBFS";
     return res;
 }
 
@@ -1815,6 +2250,64 @@ GateResult runGate8 (bool ciVmMode)
                                + fmt (lpgFbRtPct, 2) + "% RT, delta=" + (cpuDeltaPct >= 0.0 ? "+" : "")
                                + fmt (cpuDeltaPct, 2) + "% RT, lim<+2.5%) [" + (deltaOk ? "OK" : "FAIL") + "]");
     }
+    // Also measure 16-voice Release CPU delta with Power-Rail Sag + 8-Stage Phase Dispersion active (lim < +2.5% RT)
+    double railDispRtPct = 0.0, railDispDeltaPct = 0.0;
+    {
+        auto pRd = makeProcessor (sr, blk);
+        setCleanDryPatch (*pRd);
+        setP (*pRd, sub_on, 1.0f);
+        setP (*pRd, wt_on, 1.0f);
+        setP (*pRd, wt_morph, 0.45f);
+        setP (*pRd, wt_pwm, 0.35f);
+        setP (*pRd, wt_drift, 0.25f);
+        setP (*pRd, fm_on, 1.0f);
+        setP (*pRd, fm_index, 0.45f);
+        setP (*pRd, flt_on, 1.0f);
+        setP (*pRd, flt_route, 0.0f);
+        setP (*pRd, flt_a_cut, 1600.0f);
+        setP (*pRd, flt_a_res, 0.45f);
+        setP (*pRd, flt_b_cut, 4200.0f);
+        setP (*pRd, flt_b_res, 0.35f);
+        setP (*pRd, flt_drive, 0.4f);
+        setP (*pRd, v2_rail_sag, 1.0f);
+        setP (*pRd, v2_rail_time, 45.0f);
+        setP (*pRd, v2_disp_stages, 5.0f);   // 8 stages
+        setP (*pRd, v2_disp_freq, 180.0f);
+        setP (*pRd, v2_disp_pinch, 0.75f);
+        setP (*pRd, tube_on, 1.0f);
+        setP (*pRd, tube_drive, 0.45f);
+        setP (*pRd, bias_on, 1.0f);
+        setP (*pRd, verb_on, 1.0f);
+        setP (*pRd, ott_on, 1.0f);
+        setP (*pRd, mono_on, 1.0f);
+        setP (*pRd, clip_on, 1.0f);
+        setP (*pRd, amp_a, 5.0f);
+        setP (*pRd, amp_s, 1.0f);
+        setP (*pRd, amp_r, 2000.0f);
+        pRd->prepareToPlay (sr, blk);
+
+        buf.clear();
+        pRd->processBlock (buf, chordMidi);
+        for (int w = 0; w < 32; ++w) { buf.clear(); pRd->processBlock (buf, emptyMidi); }
+        std::vector<double> usRd;
+        usRd.reserve (kBlocks);
+        for (int b = 0; b < kBlocks; ++b)
+        {
+            buf.clear();
+            const auto t0 = std::chrono::steady_clock::now();
+            pRd->processBlock (buf, emptyMidi);
+            const auto t1 = std::chrono::steady_clock::now();
+            usRd.push_back (std::chrono::duration<double, std::micro> (t1 - t0).count());
+        }
+        std::sort (usRd.begin(), usRd.end());
+        railDispRtPct = usRd[usRd.size() / 2] / blockBudgetUs * 100.0;
+        railDispDeltaPct = railDispRtPct - rtPct;
+        const bool rdOk = ciVmMode || (railDispDeltaPct < 2.5);
+        if (! rdOk) res.status = GateStatus::Fail;
+        res.details.push_back ("RailSag+Disp8 16v stress: median=" + fmt (usRd[usRd.size() / 2], 1) + " us ("
+                               + fmt (railDispRtPct, 2) + "% RT, delta=" + (railDispDeltaPct >= 0.0 ? "+" : "")
+                               + fmt (railDispDeltaPct, 2) + "% RT, lim<+2.5%) [" + (rdOk ? "OK" : "FAIL") + "]");
+    }
 #ifndef NDEBUG
     res.details.push_back ("WARNING: Built without NDEBUG (not Release -O3)");
 #endif
@@ -1823,7 +2316,9 @@ GateResult runGate8 (bool ciVmMode)
                            + "% RT, " + std::string (ciVmMode ? "CI-VM info" : "lim<15.0%") + "), p95=" + fmt (p95Us, 1)
                            + " us (" + fmt (p95Pct, 2) + "% RT) [" + (ok ? "OK" : "FAIL") + "]");
     res.summary = std::to_string (activeVoices) + "v median=" + fmt (medUs, 1) + "us (" + fmt (rtPct, 2)
-                + "% RT), lpg+fb=" + fmt (lpgFbRtPct, 2) + "% (d=" + (cpuDeltaPct >= 0.0 ? "+" : "") + fmt (cpuDeltaPct, 2) + "%), p95=" + fmt (p95Pct, 2) + "% RT";
+                + "% RT), rail+disp=" + fmt (railDispRtPct, 2) + "% (d=" + (railDispDeltaPct >= 0.0 ? "+" : "")
+                + fmt (railDispDeltaPct, 2) + "%), lpg+fb=" + fmt (lpgFbRtPct, 2) + "% (d="
+                + (cpuDeltaPct >= 0.0 ? "+" : "") + fmt (cpuDeltaPct, 2) + "%), p95=" + fmt (p95Pct, 2) + "% RT";
     return res;
 }
 

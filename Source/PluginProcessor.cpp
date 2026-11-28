@@ -104,6 +104,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     preTilt[0].reset(); preTilt[1].reset();
     ruin.prepare (fs, kChunk);
     crusher.prepare (fs);
+    disperser.prepare (sampleRate);
     vhs.prepare (fs);
     tape.prepare (fs);
     follower.prepare (fs);
@@ -131,7 +132,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     resetExpressionState();
     scopeDecim = 0.0f; peakHoldL = peakHoldR = 0.0f;
     samplePos = 0; ctrlRem = 0; busRem = 0; bodyQuietSamples = 0; voiceOsIdle = true; busVoiceActive = false; busLowestHeld = -1; midiDirty = false;
-    for (auto* f : { &fGran, &fUnmask, &fCrush, &fVhs, &fFollow, &fFormant, &fOtt, &fMono, &fRes }) f->prepare (fs);
+    for (auto* f : { &fGran, &fUnmask, &fCrush, &fDisp, &fVhs, &fFollow, &fFormant, &fOtt, &fMono, &fRes }) f->prepare (fs);
     for (auto& l : lfos) l.reset();
 
     convolution.prepare ({ sampleRate, (juce::uint32) kChunk, 2 });
@@ -158,6 +159,7 @@ void VesselProcessor::setQaDeterministicSeed (uint32_t seed) noexcept
     drone.reseed (seed);
     noise.reseed (seed);
     granular.reseed (seed);
+    disperser.reset();
     vhs.reseed (seed);
     resonator.reseed (seed);
     organicBus.reseed (seed);
@@ -199,7 +201,9 @@ void VesselProcessor::snapToCurrentState()
     }
     busMod.fill (0.0f);
     baseReady = true;
-    fGran.snap (pb (gran_on)); fUnmask.snap (pb (unmask_on)); fCrush.snap (pb (crush_on)); fVhs.snap (pb (vhs_on));
+    fGran.snap (pb (gran_on)); fUnmask.snap (pb (unmask_on)); fCrush.snap (pb (crush_on)); fDisp.snap (pc (v2_disp_stages) > 0);
+    fVhs.snap (pb (vhs_on));
+    disperser.reset();
     fFollow.snap (pb (envf_on)); fFormant.snap (pb (form_on)); fOtt.snap (pb (ott_on)); fMono.snap (pb (mono_on));
     fRes.snap (pb (res_on));
     convMixS.snap (pb (conv_on) ? pv (conv_mix) : 0.0f);
@@ -782,6 +786,8 @@ void VesselProcessor::buildVoiceParams()
     vp.lpgStrike = pv (v2_lpg_strike);
     vp.fbFilter = pv (v2_fb_filter);
     vp.fbFm = pv (v2_fb_fm);
+    vp.railSag = pv (v2_rail_sag);
+    vp.railTimeMs = pv (v2_rail_time);
 
     struct VoiceRoute { int dest = -1; float amt = 0.0f; int srcKind = 0; };
     VoiceRoute routes[6];
@@ -951,6 +957,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
             {
                 const int lpgM = pc (v2_lpg_mode);
                 voices.snapFilter (pb (flt_on) || lpgM == 1 || lpgM == 2);
+                voices.tickIdle (subLen * VoiceManager::kOs);
             }
         }
 
@@ -999,6 +1006,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         std::fill_n (subB.data(),  n, 0.0f);
         const int lpgM = pc (v2_lpg_mode);
         voices.snapFilter (pb (flt_on) || lpgM == 1 || lpgM == 2);
+        voices.tickIdle (n * VoiceManager::kOs);
     }
     std::fill_n (texL.data(), n, 0.0f); std::fill_n (texR.data(), n, 0.0f);
 
@@ -1114,6 +1122,14 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     const float subDecay = fastExp2 (-0.07400058f * ((float) n * (1.0f / (float) kChunk)));
     telemetry.subLevel.store (flushDenormal (std::max (subLevelNow, telemetry.subLevel.load (std::memory_order_relaxed) * subDecay)),
                               std::memory_order_relaxed);
+
+    // ── Zero-gain-change 4-to-8-stage 64-bit TPT all-pass phase dispersion (post-sub-rejoin, sub-120 Hz mono-correlated)
+    {
+        const int dispChoice = pc (v2_disp_stages);   // 0=Off, 1..5 -> 4..8 stages
+        PhaseDisperser::Params dpp { true, dispChoice > 0 ? (dispChoice + 3) : disperser.activeStages(),
+                                     pvBus (v2_disp_freq), pvBus (v2_disp_pinch) };
+        faded (fDisp, dispChoice > 0, n, [&] (bool on) { dpp.on = on; disperser.process (xL.data(), xR.data(), n, dpp, isBusTick, busSpan); });
+    }
 
     // ── (7) VHS → (8) tape motor
     {

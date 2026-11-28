@@ -286,6 +286,7 @@ private:
     vessel::dsp::Tilt preTilt[2];
     vessel::dsp::RuinCore ruin;
     vessel::dsp::BitCrusher crusher;
+    vessel::dsp::PhaseDisperser disperser;
     vessel::dsp::VhsTransport vhs;
     vessel::dsp::TapeMotor tape;
     vessel::dsp::FollowerFilter follower;
@@ -306,7 +307,7 @@ private:
     vessel::dsp::DelayLine subAlign;
     vessel::dsp::Smooth convMixS;
     vessel::dsp::Ramp inLevelR, sendR, cleanR;
-    vessel::dsp::BypassFade fGran, fUnmask, fCrush, fVhs, fFollow, fFormant, fOtt, fMono, fRes;
+    vessel::dsp::BypassFade fGran, fUnmask, fCrush, fDisp, fVhs, fFollow, fFormant, fOtt, fMono, fRes;
     int resMonoNote = -1;   // the note the resonator follows in mono / legato voice modes
 
     // 4x voice bus: rendered oversampled, decimated once for body L/R and sub together
