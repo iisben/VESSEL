@@ -172,6 +172,142 @@ private:
 };
 
 //==============================================================================
+/** 64-bit nonlinear CdS photoresistor (VTL5C3 / Buchla 292 style) Vactrol
+   Low-Pass Gate model.
+    - Fast photo-carrier attack (~1.0 ms shallow, ~4.0 ms deep trap) with zero
+      step discontinuities.
+    - Sluggish two-stage nonlinear curved release:
+        1) Stage 1 (shallow traps): snappy 14..110 ms percussive transient drop.
+        2) Stage 2 (deep traps): persistent 60..360 ms base decay slowed further
+           as conductance drops (dG/dt ~ -(c0 + c1*G)*G), creating organic
+           woody/liquid IDM plucks that still decay cleanly below -120 dBFS.
+    - Physically coupled filter cutoff ((G + G_dark)/(1 + G_dark), ~7 octaves)
+      and VCA photoresistor voltage-divider gain (G*(1 + k)/(G + k), harmonics
+      darken before fundamental fades).
+    - Sample-rate & block-size invariant across 44.1-192 kHz. */
+struct VactrolLpg {
+  static constexpr double kDarkCond = 0.008;   // ~125:1 CdS dark/light ratio (~7 oct)
+  static constexpr double kVcaKnee = 0.22;     // photoresistor VCA divider curve knee
+  static constexpr double kPingHoldS = 0.0032; // 3.2 ms LED strike pulse hold
+  static constexpr double kPingTauS = 0.0018;  // 1.8 ms LED turn-off fall
+  static constexpr double kAttFastS = 0.0010;  // 1.0 ms fast shallow-trap rise
+  static constexpr double kAttSlowS = 0.0040;  // 4.0 ms deep-trap charging rise
+  static constexpr double kSmoothTauS = 0.00045; // 0.45 ms C1 corner-rounding smoother
+
+  double pingPeak = 0.0;
+  double pingTimerS = 0.0;
+  double pingLevel = 0.0;
+  double vFast = 0.0;
+  double vSlow = 0.0;
+  double vOut = 0.0;
+
+  double lastH = -1.0;
+  double aPing = 0.9, aAttFast = 0.15, aAttSlow = 0.04, aSmooth = 0.3;
+
+  void reset() noexcept {
+    pingPeak = pingTimerS = pingLevel = 0.0;
+    vFast = vSlow = vOut = 0.0;
+  }
+
+  /** Excite the internal LED on note-on (from current state for natural
+   * overlapping strikes when not fresh). */
+  void strike(double velScale, bool freshVoice) noexcept {
+    if (freshVoice)
+      reset();
+    pingPeak = std::clamp(velScale, 0.05, 1.0);
+    pingTimerS = kPingHoldS;
+    pingLevel = pingPeak;
+  }
+
+  bool isActive() const noexcept {
+    return pingTimerS > 0.0 || pingLevel > 1.0e-6 || vFast > 1.0e-6 ||
+           vSlow > 1.0e-6 || vOut > 1.0e-6;
+  }
+
+  /** Advance photoresistor state by exact duration dtSec (100% sample-rate
+   * invariant across 44.1-192 kHz). */
+  void advance(double dtSec, double gateEnv, double decay01,
+               double strike01) noexcept {
+    const double d = std::clamp(decay01, 0.0, 1.0);
+    const double st = std::clamp(strike01, 0.0, 1.0);
+    const double d2 = d * d;
+    const double tauFastDec = 0.014 + 0.096 * d2; // 14..110 ms initial knock
+    const double tauSlowDec = 0.060 + 0.300 * d2; // 60..360 ms deep-trap tail
+    const double wSlow = 0.24 + 0.30 * d;         // 24%..54% deep-trap weight
+
+    const int nSub = (dtSec > 0.00022)
+                         ? std::max(2, (int)std::ceil(dtSec / 0.00020))
+                         : 1;
+    const double h = dtSec / (double)nSub;
+    if (std::abs(h - lastH) > 1.0e-12) {
+      lastH = h;
+      aPing = std::exp(-h / kPingTauS);
+      aAttFast = 1.0 - std::exp(-h / kAttFastS);
+      aAttSlow = 1.0 - std::exp(-h / kAttSlowS);
+      aSmooth = 1.0 - std::exp(-h / kSmoothTauS);
+    }
+    const double invTauF = h / tauFastDec;
+    const double invTauS = h / tauSlowDec;
+
+    for (int s = 0; s < nSub; ++s) {
+      if (pingTimerS > 0.0) {
+        pingTimerS = std::max(0.0, pingTimerS - h);
+        pingLevel = pingPeak;
+      } else {
+        pingLevel = flushDenormal(pingLevel * aPing);
+      }
+
+      const double u =
+          std::clamp(std::max(pingLevel * st, gateEnv * (1.0 - st)), 0.0, 1.0);
+
+      // Stage 1 (shallow traps): fast attack, nonlinear conductance-dependent drop
+      if (u > vFast) {
+        vFast += aAttFast * (u - vFast);
+      } else {
+        const double decF = std::exp(-invTauF * (0.35 + 0.65 * vFast));
+        vFast = u + decF * (vFast - u);
+      }
+
+      // Stage 2 (deep traps): slower charging, sluggish concave tail
+      const double deepTarget = std::max(u, 0.85 * vFast);
+      if (deepTarget > vSlow) {
+        vSlow += aAttSlow * (deepTarget - vSlow);
+      } else {
+        const double decS = std::exp(-invTauS * (0.42 + 0.58 * vSlow));
+        vSlow = u + decS * (vSlow - u);
+      }
+
+      vFast = flushDenormal(vFast);
+      vSlow = flushDenormal(vSlow);
+      const double gRaw =
+          std::min(1.0, (1.0 - wSlow) * vFast + wSlow * vSlow * 1.15);
+      vOut = flushDenormal(vOut + aSmooth * (gRaw - vOut));
+    }
+
+    if (pingTimerS <= 0.0 && pingLevel < 1.0e-6 && gateEnv < 1.0e-6 &&
+        vFast < 1.0e-6 && vSlow < 1.0e-6 && vOut < 1.0e-6) {
+      vFast = vSlow = vOut = pingLevel = 0.0;
+    }
+  }
+
+  double conductance() const noexcept { return std::clamp(vOut, 0.0, 1.0); }
+
+  /** Physical CdS filter cutoff scaling: f_c(G) / f_max = (G + G_dark) / (1 + G_dark). */
+  double filterCutoffMul() const noexcept {
+    const double g = conductance();
+    return (g + kDarkCond) / (1.0 + kDarkCond);
+  }
+
+  /** Physical CdS VCA voltage-divider curve: fuller during attack, closes gently after filter. */
+  double vcaGain() const noexcept {
+    const double g = conductance();
+    if (g <= 1.0e-7)
+      return 0.0;
+    return g * (1.0 + kVcaKnee) / (g + kVcaKnee);
+  }
+};
+
+//==============================================================================
 /** Lane-parallel bank of 64-bit double coupled 4-pole nonlinear ZDF transistor
    ladders (24 dB/oct, running at 4x voice oversampling):
     - Deterministic per-stage +/-0.5% cutoff & gain component mismatch
@@ -765,6 +901,393 @@ template <int L> struct LadderBank {
       }
     }
   }
+
+  /** 8-lane SIMD register cache for sample-by-sample closed-loop audio-rate
+   * feedback across 8 voices simultaneously (hoisted steady-state fast path +
+   * isolated bias tracker -> zero vector spills, zero scalar fallback). */
+  struct GroupState8 {
+    alignas(32) double ls0[8]{}, ls1[8]{}, ls2[8]{}, ls3[8]{};
+    alignas(32) double lG[8]{}, ldG[8]{}, lk[8]{}, ldk[8]{}, ld[8]{}, ldd[8]{},
+        lid[8]{}, ldid[8]{}, lTol[8]{};
+    alignas(32) double cA0[8]{}, cA1[8]{}, cA2[8]{}, cA3[8]{};
+    // Steady-state hoisted constants (used when useFastInv && coeffsConst)
+    alignas(32) double cg0[8]{}, cg1[8]{}, cg2[8]{}, cg3[8]{};
+    alignas(32) double cIdA0[8]{}, cS0[8]{}, cS1[8]{}, cS2[8]{}, cS3[8]{};
+    alignas(32) double cG01[8]{}, cG23[8]{}, cG4did[8]{}, cG4idk[8]{},
+        cInvPiv[8]{};
+    alignas(32) double cBass[8]{}, cD[8]{}, cK[8]{}, cDK[8]{};
+    bool useFastInv = true;
+    bool coeffsConst = false;
+
+    void load(const LadderBank<L> &bank, int base, int m) noexcept {
+      double maxG = 0.0;
+      double maxDelta = 0.0;
+      for (int j = 0; j < 8; ++j) {
+        const int l = base + j;
+        ls0[j] = bank.s0[l];
+        ls1[j] = bank.s1[l];
+        ls2[j] = bank.s2[l];
+        ls3[j] = bank.s3[l];
+        lG[j] = bank.G[l];
+        ldG[j] = bank.dG[l];
+        lk[j] = bank.k[l];
+        ldk[j] = bank.dk[l];
+        ld[j] = bank.drv[l];
+        ldd[j] = bank.ddrv[l];
+        lid[j] = bank.isd[l];
+        ldid[j] = bank.disd[l];
+        lTol[j] = bank.tol[l];
+        cA0[j] = 1.0 + kDa0 * lTol[j];
+        cA1[j] = 1.0 + kDa1 * lTol[j];
+        cA2[j] = 1.0 + kDa2 * lTol[j];
+        cA3[j] = 1.0 + kDa3 * lTol[j];
+        maxG = std::max({maxG, lG[j], lG[j] + ldG[j] * (double)m});
+        maxDelta = std::max({maxDelta, std::abs(ldG[j]), std::abs(ldk[j]),
+                             std::abs(ldd[j]), std::abs(ldid[j])});
+      }
+      useFastInv = (maxG < 0.24);
+      coeffsConst = (maxDelta == 0.0);
+      if (useFastInv && coeffsConst) {
+        for (int j = 0; j < 8; ++j) {
+          const double g = lG[j], kk = lk[j], d = ld[j], id = lid[j],
+                       tl = lTol[j];
+          const double gStep = g * (1.0 - g) * tl;
+          const double g0 = g + gStep * kDg0;
+          const double g1 = g + gStep * kDg1;
+          const double g2 = g + gStep * kDg2;
+          const double g3 = g + gStep * kDg3;
+          const double p0 = cA0[j] * g0, p1 = cA1[j] * g1;
+          const double p2 = cA2[j] * g2, p3 = cA3[j] * g3;
+          const double G01 = p1 * p0, G23 = p3 * p2, G4 = G23 * G01;
+          const double G4did = G4 * (d * id);
+          const double G4idk = G4did * kk;
+          cg0[j] = g0;
+          cg1[j] = g1;
+          cg2[j] = g2;
+          cg3[j] = g3;
+          cIdA0[j] = id * cA0[j];
+          cS0[j] = p1 * (1.0 - g0);
+          cS1[j] = 1.0 - g1;
+          cS2[j] = p3 * (1.0 - g2);
+          cS3[j] = 1.0 - g3;
+          cG01[j] = G01 * id;
+          cG23[j] = G23;
+          cG4did[j] = G4did;
+          cG4idk[j] = G4idk;
+          cInvPiv[j] = 1.0 - G4idk * (1.0 - G4idk * (1.0 - G4idk));
+          cBass[j] = 1.0 + 0.55 * kk;
+          cD[j] = d;
+          cK[j] = kk;
+          cDK[j] = d * kk;
+        }
+      }
+    }
+
+    void resetLane(int j) noexcept { ls0[j] = ls1[j] = ls2[j] = ls3[j] = 0.0; }
+
+    void store(LadderBank<L> &bank, int base) const noexcept {
+      for (int j = 0; j < 8; ++j) {
+        const int l = base + j;
+        bank.s0[l] = flushDenormal(ls0[j]);
+        bank.s1[l] = flushDenormal(ls1[j]);
+        bank.s2[l] = flushDenormal(ls2[j]);
+        bank.s3[l] = flushDenormal(ls3[j]);
+        bank.G[l] = lG[j];
+        bank.k[l] = lk[j];
+        bank.drv[l] = ld[j];
+        bank.isd[l] = lid[j];
+      }
+    }
+
+    inline void stepFastConst(const double *__restrict xin,
+                              double *__restrict yout) noexcept {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+      for (int j = 0; j < 8; ++j) {
+        const double S01 = cS0[j] * ls0[j] + cS1[j] * ls1[j];
+        const double S23 = cS2[j] * ls2[j] + cS3[j] * ls3[j];
+        const double x = xin[j] * cBass[j];
+        const double y3 = (cG4did[j] * x + cG23[j] * S01 + S23) * cInvPiv[j];
+
+        const double wIn = cD[j] * (x - cK[j] * y3) + kBIn;
+        const double ac = wIn < -6.0 ? -6.0 : (wIn > 6.0 ? 6.0 : wIn);
+        const double a2 = ac * ac;
+        const double thIn =
+            (ac *
+             (34459425.0 +
+              a2 * (4729725.0 + a2 * (135135.0 + a2 * (990.0 + a2))))) /
+            (34459425.0 +
+             a2 * (16216200.0 +
+                   a2 * (945945.0 + a2 * (13860.0 + 45.0 * a2))));
+        const double phi = (thIn - kTIn0) * kInvSIn0;
+        const double dphi = (1.0 - thIn * thIn) * kInvSIn0;
+
+        const double y1_0 = cG01[j] * phi + S01;
+        const double wMRaw = kBetaM * y1_0 + kBM;
+        const double wm = wMRaw < -1.5 ? -1.5 : (wMRaw > 1.5 ? 1.5 : wMRaw);
+        const double wm2 = wm * wm;
+        const double m1_0 = (wm * (1.0 - kCubicC * wm2) - kHM0) * kInvBetaDHM0;
+        const double dpsi = (1.0 - kDerivC * wm2) * kInvDHM0;
+
+        const double uNr = cG4idk[j] * dpsi * dphi;
+        const double invNr = 1.0 - uNr * (1.0 - uNr * (1.0 - uNr));
+        const double step = (y3 - (cG23[j] * m1_0 + S23)) * invNr;
+
+        const double rawPhi = phi + dphi * (cDK[j] * step);
+        const double clampedPhi =
+            rawPhi < kPhiMin ? kPhiMin
+                             : (rawPhi > kPhiMax ? kPhiMax : rawPhi);
+        const double a0u = cIdA0[j] * clampedPhi;
+
+        double v = (a0u - ls0[j]) * cg0[j];
+        const double y0 = v + ls0[j];
+        ls0[j] = y0 + v;
+
+        v = (cA1[j] * y0 - ls1[j]) * cg1[j];
+        const double y1 = v + ls1[j];
+        ls1[j] = y1 + v;
+
+        const double rawM1 = m1_0 + dpsi * (y1 - y1_0);
+        const double m1 =
+            rawM1 < kPsiMin ? kPsiMin : (rawM1 > kPsiMax ? kPsiMax : rawM1);
+
+        v = (cA2[j] * m1 - ls2[j]) * cg2[j];
+        const double y2 = v + ls2[j];
+        ls2[j] = y2 + v;
+
+        v = (cA3[j] * y2 - ls3[j]) * cg3[j];
+        const double y3Out = v + ls3[j];
+        ls3[j] = y3Out + v;
+        yout[j] = y3Out;
+      }
+    }
+
+    inline void step(const double *__restrict xin,
+                     double *__restrict yout) noexcept {
+      if (useFastInv && coeffsConst) {
+        stepFastConst(xin, yout);
+      } else if (useFastInv) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+        for (int j = 0; j < 8; ++j) {
+          const double g = (lG[j] += ldG[j]);
+          const double kk = (lk[j] += ldk[j]);
+          const double d = (ld[j] += ldd[j]);
+          const double id = (lid[j] += ldid[j]);
+
+          const double gStep = g * (1.0 - g) * lTol[j];
+          const double g0 = g + gStep * kDg0;
+          const double g1 = g + gStep * kDg1;
+          const double g2 = g + gStep * kDg2;
+          const double g3 = g + gStep * kDg3;
+
+          const double p0 = cA0[j] * g0, p1 = cA1[j] * g1;
+          const double p2 = cA2[j] * g2, p3 = cA3[j] * g3;
+          const double G01 = p1 * p0, G23 = p3 * p2, G4 = G23 * G01;
+          const double S01 = p1 * (1.0 - g0) * ls0[j] + (1.0 - g1) * ls1[j];
+          const double S23 = p3 * (1.0 - g2) * ls2[j] + (1.0 - g3) * ls3[j];
+
+          const double x = xin[j] * (1.0 + 0.55 * kk);
+          const double G4did = G4 * (d * id);
+          const double G4idk = G4did * kk;
+          const double invPiv = 1.0 - G4idk * (1.0 - G4idk * (1.0 - G4idk));
+          const double y3 = (G4did * x + G23 * S01 + S23) * invPiv;
+
+          const double wIn = d * (x - kk * y3) + kBIn;
+          const double ac = wIn < -6.0 ? -6.0 : (wIn > 6.0 ? 6.0 : wIn);
+          const double a2 = ac * ac;
+          const double thIn =
+              (ac *
+               (34459425.0 +
+                a2 * (4729725.0 + a2 * (135135.0 + a2 * (990.0 + a2))))) /
+              (34459425.0 +
+               a2 * (16216200.0 +
+                     a2 * (945945.0 + a2 * (13860.0 + 45.0 * a2))));
+          const double phi = (thIn - kTIn0) * kInvSIn0;
+          const double dphi = (1.0 - thIn * thIn) * kInvSIn0;
+
+          const double y1_0 = G01 * (id * phi) + S01;
+          const double wMRaw = kBetaM * y1_0 + kBM;
+          const double wm = wMRaw < -1.5 ? -1.5 : (wMRaw > 1.5 ? 1.5 : wMRaw);
+          const double wm2 = wm * wm;
+          const double m1_0 =
+              (wm * (1.0 - kCubicC * wm2) - kHM0) * kInvBetaDHM0;
+          const double dpsi = (1.0 - kDerivC * wm2) * kInvDHM0;
+
+          const double uNr = G4idk * dpsi * dphi;
+          const double invNr = 1.0 - uNr * (1.0 - uNr * (1.0 - uNr));
+          const double step = (y3 - (G23 * m1_0 + S23)) * invNr;
+
+          const double rawPhi = phi + dphi * (d * kk * step);
+          const double clampedPhi =
+              rawPhi < kPhiMin ? kPhiMin
+                               : (rawPhi > kPhiMax ? kPhiMax : rawPhi);
+          const double a0u = (cA0[j] * id) * clampedPhi;
+
+          double v = (a0u - ls0[j]) * g0;
+          const double y0 = v + ls0[j];
+          ls0[j] = y0 + v;
+
+          v = (cA1[j] * y0 - ls1[j]) * g1;
+          const double y1 = v + ls1[j];
+          ls1[j] = y1 + v;
+
+          const double rawM1 = m1_0 + dpsi * (y1 - y1_0);
+          const double m1 =
+              rawM1 < kPsiMin ? kPsiMin : (rawM1 > kPsiMax ? kPsiMax : rawM1);
+
+          v = (cA2[j] * m1 - ls2[j]) * g2;
+          const double y2 = v + ls2[j];
+          ls2[j] = y2 + v;
+
+          v = (cA3[j] * y2 - ls3[j]) * g3;
+          const double y3Out = v + ls3[j];
+          ls3[j] = y3Out + v;
+          yout[j] = y3Out;
+        }
+      } else {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+        for (int j = 0; j < 8; ++j) {
+          const double g = (lG[j] += ldG[j]);
+          const double kk = (lk[j] += ldk[j]);
+          const double d = (ld[j] += ldd[j]);
+          const double id = (lid[j] += ldid[j]);
+
+          const double gStep = g * (1.0 - g) * lTol[j];
+          const double g0 = g + gStep * kDg0;
+          const double g1 = g + gStep * kDg1;
+          const double g2 = g + gStep * kDg2;
+          const double g3 = g + gStep * kDg3;
+
+          const double p0 = cA0[j] * g0, p1 = cA1[j] * g1;
+          const double p2 = cA2[j] * g2, p3 = cA3[j] * g3;
+          const double G01 = p1 * p0, G23 = p3 * p2, G4 = G23 * G01;
+          const double S01 = p1 * (1.0 - g0) * ls0[j] + (1.0 - g1) * ls1[j];
+          const double S23 = p3 * (1.0 - g2) * ls2[j] + (1.0 - g3) * ls3[j];
+
+          const double x = xin[j] * (1.0 + 0.55 * kk);
+          const double G4did = G4 * (d * id);
+          const double G4idk = G4did * kk;
+          double y3 = (G4did * x + G23 * S01 + S23) / (1.0 + G4idk);
+
+          for (int it = 0; it < 3; ++it) {
+            const double thIn = fastTanhLadder(d * (x - kk * y3) + kBIn);
+            const double phi = (thIn - kTIn0) * kInvSIn0;
+            const double dphi = (1.0 - thIn * thIn) * kInvSIn0;
+            const double y1Try = G01 * (id * phi) + S01;
+            const double wm = std::clamp(kBetaM * y1Try + kBM, -1.5, 1.5);
+            const double wm2 = wm * wm;
+            const double m1Try =
+                (wm * (1.0 - kCubicC * wm2) - kHM0) * kInvBetaDHM0;
+            const double dpsi = (1.0 - kDerivC * wm2) * kInvDHM0;
+            const double res = y3 - (G23 * m1Try + S23);
+            const double jac = 1.0 + G4idk * dpsi * dphi;
+            y3 -= res / jac;
+          }
+
+          const double thF = fastTanhLadder(d * (x - kk * y3) + kBIn);
+          const double a0u = (cA0[j] * id) * (thF - kTIn0) * kInvSIn0;
+
+          double v = (a0u - ls0[j]) * g0;
+          const double y0 = v + ls0[j];
+          ls0[j] = y0 + v;
+
+          v = (cA1[j] * y0 - ls1[j]) * g1;
+          const double y1 = v + ls1[j];
+          ls1[j] = y1 + v;
+
+          const double wmF = std::clamp(kBetaM * y1 + kBM, -1.5, 1.5);
+          const double m1 =
+              (wmF * (1.0 - kCubicC * wmF * wmF) - kHM0) * kInvBetaDHM0;
+
+          v = (cA2[j] * m1 - ls2[j]) * g2;
+          const double y2 = v + ls2[j];
+          ls2[j] = y2 + v;
+
+          v = (cA3[j] * y2 - ls3[j]) * g3;
+          const double y3Out = v + ls3[j];
+          ls3[j] = y3Out + v;
+          yout[j] = y3Out;
+        }
+      }
+    }
+  };
+
+  /** Isolated per-group I_BIAS energy tracker for feedback slices (0 vector
+   * register pressure inside the ZDF feedback loop). */
+  void updateBiasGroup8(int base, const double (*inSeq)[8], int m) noexcept {
+    alignas(32) double lb[8], le[8], lds[8];
+    for (int j = 0; j < 8; ++j) {
+      const int l = base + j;
+      lb[j] = sBass[l];
+      le[j] = sBias[l];
+      lds[j] = drvSag[l];
+    }
+    const double cB = cBassEnv, cS = cSag;
+    for (int i = 0; i < m; ++i) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+      for (int j = 0; j < 8; ++j) {
+        const double xr = inSeq[i][j];
+        lb[j] += cB * (xr - lb[j]);
+        le[j] += cS * ((1.4 * lb[j] * lb[j] + 0.35 * xr * xr) * lds[j] - le[j]);
+      }
+    }
+    for (int j = 0; j < 8; ++j) {
+      const int l = base + j;
+      sBass[l] = flushDenormal(lb[j]);
+      sBias[l] = flushDenormal(le[j]);
+    }
+  }
+};
+
+//==============================================================================
+/** 64-bit SoA oversampled audio-rate feedback conditioning bank (runs inside
+   the existing 4x voice oversampling loop; zero nested oversampling, zero added
+   latency):
+    - 64-bit ~22 Hz DC blocker (exact 0 at DC, unity at Nyquist) prevents DC
+      latch-up even under heavy asymmetric filter/drive self-oscillation.
+    - Sample-rate-invariant 12 kHz analog return lowpass keeps feedback phase,
+      harmonic warmth, and aliasing floor consistent across 44.1-192 kHz.
+    - Zero-division odd-symmetric C2 cubic soft-saturation limiter strictly
+      bounds return energy in [-kFbLim, +kFbLim] with zero DC injection and
+      zero >3rd-order aliasing harmonics. */
+template <int L> struct FeedbackBank {
+  static constexpr double kFbLim = 0.85;
+  static constexpr double kInvFbLim = 1.0 / kFbLim;
+  static constexpr double kCubicC = 4.0 / 27.0;
+
+  alignas(32) double dcX1[L]{}, dcY1[L]{}, lpZ[L]{}, fbSat[L]{};
+  alignas(32) double fbG[L]{}, dFbG[L]{};
+  double dcR = 0.99928, dcG = 0.99964, lpA = 0.3247;
+
+  void setSampleRate(double osr) noexcept {
+    const double safeOsr = std::max(osr, 1.0);
+    dcR = std::exp(-kTwoPiD * 22.0 / safeOsr);
+    dcG = 0.5 * (1.0 + dcR);
+    const double fcLp = std::min(12000.0, 0.42 * safeOsr);
+    lpA = 1.0 - std::exp(-kTwoPiD * fcLp / safeOsr);
+  }
+
+  void resetLane(int l) noexcept {
+    dcX1[l] = dcY1[l] = lpZ[l] = fbSat[l] = 0.0;
+  }
+
+  void setLane(int l, double targetFbG, int m, bool snap) noexcept {
+    if (snap || std::abs(targetFbG - fbG[l]) <= 1.0e-6) {
+      fbG[l] = targetFbG;
+      dFbG[l] = 0.0;
+      return;
+    }
+    dFbG[l] = (targetFbG - fbG[l]) / (double)std::max(1, m);
+  }
+
+  void holdLane(int l) noexcept { dFbG[l] = 0.0; }
 };
 
 struct VoiceParams {
@@ -790,6 +1313,10 @@ struct VoiceParams {
         fmEnv = 0.0f, fmDecay = 0.4f, fmKey = 0.0f;
   // V2 Dark Analog Organic Layer (0% default)
   float organicAmt = 0.0f;
+  // V2 Vactrol LPG & Audio-Rate Feedback (Off / 0% default)
+  int lpgMode = 0;
+  float lpgDecay = 0.45f, lpgStrike = 0.65f;
+  float fbFilter = 0.0f, fbFm = 0.0f;
 };
 
 //==============================================================================
@@ -828,6 +1355,7 @@ public:
   void reset() {
     ampEnv.reset();
     filtEnv.reset();
+    vactrol.reset();
     oscDc.reset();
     active = false;
     gateHeld = false;
@@ -843,11 +1371,17 @@ public:
     wt.phase = 0.0;
     fmPhase = 0.0;
     fmModPrev = 0.0;
+    fbPmPrev = 0.0;
     fmY1 = fmY2 = fmEnvLevel = fmGate = 0.0f;
-    for (auto *r : {&sub1L,   &sub2L,     &sub1S,    &sub2S,    &weight,  &wtL,
-                    &morph,   &pwBase,    &pwmDepth, &cutA,     &cutB,    &resA,
-                    &resB,    &fDrive,    &envAmt,   &keyTrack, &velGain, &bend,
-                    &wtTuneR, &spreadPan, &fmIdx,    &fmEnvAmt, &fmFbR})
+    lpgMode = 0;
+    vactrolStrikePending = false;
+    curFbFmLive = false;
+    for (auto *r : {&sub1L,     &sub2L,      &sub1S,    &sub2S,    &weight,
+                    &wtL,       &morph,      &pwBase,   &pwmDepth, &cutA,
+                    &cutB,      &resA,       &resB,     &fDrive,   &envAmt,
+                    &keyTrack,  &velGain,    &bend,     &wtTuneR,  &spreadPan,
+                    &fmIdx,     &fmEnvAmt,   &fmFbR,    &lpgDecayR,
+                    &lpgStrikeR, &fbFmR,     &vactrolVca})
       r->reset();
   }
 
@@ -891,10 +1425,12 @@ public:
       ampEnv.noteOn();
       filtEnv.noteOn();
       fmEnvLevel = 1.0f;
+      vactrolStrikePending = true;
     }
     if (wasSilent) {
       fmPhase = 0.0;
       fmModPrev = 0.0;
+      fbPmPrev = 0.0;
       fmY1 = fmY2 = 0.0f;
     }
     active = true;
@@ -958,6 +1494,23 @@ public:
     set(bend, p.bend);
     set(wtTuneR, p.wtTune);
     set(spreadPan, p.drift);
+    set(fbFmR, p.fbFm);
+
+    lpgMode = p.lpgMode;
+    if (lpgMode != 0) {
+      set(lpgDecayR, p.lpgDecay);
+      set(lpgStrikeR, p.lpgStrike);
+      if (vactrolStrikePending) {
+        const double velScale = (double)(1.0f - p.velAmp + p.velAmp * velocity);
+        vactrol.strike(velScale, fresh);
+        if (fresh)
+          vactrolVca.snap(0.0f);
+        vactrolStrikePending = false;
+      }
+    } else {
+      vactrolStrikePending = false;
+      vactrolVca.snap(ampEnv.currentLevel());
+    }
 
     const float gateTarget = p.fmOn ? 1.0f : 0.0f;
     if (fresh)
@@ -1030,6 +1583,10 @@ public:
     curFmDt = std::min(0.45, curDt * (double)fmRatio);
     curFmKeyGain = (double)std::clamp(
         fastExp2(-fmKey * (noteBent - 48.0f) * (1.0f / 12.0f)), 0.25f, 2.0f);
+    curFbFmLive = (fbFmR.cur > 1.0e-5f || fbFmR.inc != 0.0f ||
+                   std::abs(fbPmPrev) > 1.0e-7);
+    curFbFmKeyGain = (double)std::clamp(
+        fastExp2(-0.045f * std::max(0.0f, noteBent - 84.0f)), 0.45f, 1.0f);
 
     constexpr double kMaxIndex = 12.0 / kTwoPiD;
     float fmSpread = 1.0f;
@@ -1045,6 +1602,12 @@ public:
       fmSpread = 1.0f + (float)(kTwoPiD * kMaxIndex * (double)(xPeak * xPeak) *
                                 curFmKeyGain * (double)fmRatio *
                                 (1.0 + 1.5 * (double)fbPeak));
+    }
+    if (curFbFmLive) {
+      const float fbFmPeak =
+          clamp01(std::max(fbFmR.cur, fbFmR.cur + fbFmR.inc * (float)mCtrl));
+      fmSpread += (float)(kTwoPiD * kFbFmMaxCycles *
+                          (double)(fbFmPeak * fbFmPeak) * curFbFmKeyGain * 1.5);
     }
 
     const float pwMid = std::clamp(pwBase.cur + pwmDepth.cur * 0.44f * pwmLfo +
@@ -1065,21 +1628,58 @@ public:
     const float hi = 0.485f * sr;
     cA = std::clamp(fastExp2(cutA.cur + octs), 10.0f, hi);
     cB = std::clamp(fastExp2(cutB.cur + octs), 10.0f, hi);
+    if (lpgMode != 0) {
+      lpgDecayR.skip(mCtrl);
+      lpgStrikeR.skip(mCtrl);
+      vactrol.advance((double)mCtrl / (double)osr, (double)ampEnv.currentLevel(),
+                      (double)lpgDecayR.cur, (double)lpgStrikeR.cur);
+      if (lpgMode == 1 || lpgMode == 2) {
+        const float lpgMul = (float)vactrol.filterCutoffMul();
+        cA = std::clamp(cA * lpgMul, 18.0f, hi);
+        cB = std::clamp(cB * lpgMul, 18.0f, hi);
+      }
+      if (lpgMode == 1 || lpgMode == 3) {
+        vactrolVca.to((float)vactrol.vcaGain(), mCtrl);
+      } else {
+        vactrolVca.snap(ampEnv.currentLevel());
+      }
+    }
     rA = clamp01(resA.cur);
     rB = clamp01(resB.cur);
     const float dr = clamp01(fDrive.cur);
     drive = 1.0f + 6.0f * dr * dr;
   }
 
-  /** Renders m oversampled samples into contiguous SoA buffers oscOut[m],
-   * gainOut[m], and sums into sub[m]. */
-  void renderSamples(int m, float *__restrict oscOut, float *__restrict gainOut,
+  bool isFbFmActive() const noexcept { return curFbFmLive; }
+  bool isLpgFilterActive() const noexcept { return lpgMode == 1 || lpgMode == 2; }
+
+  /** Compact pre-computed wavetable parameters for closed-loop post-filter ->
+   * oscillator TZFM feedback (all envelopes, sub, FM op, and ramps stay
+   * register-promoted inside renderPreFbFm; only wt.phase + oscDc run per
+   * sample inside the 8-lane feedback loop). */
+  struct FbFmSlice {
+    bool wtLive = false, morphConst = true, fbFmLive = false;
+    int stealAt = -1;
+    double dtAfterSteal = 0.001;
+    WavetableBank::ResolvedSlice resolvedWt{};
+    float pwBuf[32]{}, morphBuf[32]{}, wtGainBuf[32]{};
+    double tzfmBase[32]{}, fbDepthBuf[32]{};
+  };
+
+  /** Register-promoted pre-pass for voices inside an active fbFm closed loop:
+   * computes sub, amp/LPG VCA gain, FM operator, PWM, and feedback depth for
+   * all m samples while keeping all Voice state in registers. */
+  void renderPreFbFm(int m, FbFmSlice &fs, float *__restrict gainOut,
                      float *__restrict sub) noexcept {
     constexpr double kMaxIndex = 12.0 / kTwoPiD;
     const bool subLive = sub1L.cur > 0.0f || sub2L.cur > 0.0f ||
                          sub1L.inc != 0.0f || sub2L.inc != 0.0f;
-    const bool wtLive = wtL.cur > 0.0f || wtL.inc != 0.0f;
+    fs.wtLive = wtL.cur > 0.0f || wtL.inc != 0.0f;
     const bool fmLive = curFmLive;
+    fs.fbFmLive = curFbFmLive;
+    fs.stealAt = -1;
+    fs.dtAfterSteal = curDt;
+    const bool useVactrolVca = (lpgMode == 1 || lpgMode == 3);
 
     if (!fmLive) {
       fmIdx.skip(m);
@@ -1088,6 +1688,163 @@ public:
       if (fmOn && fmEnvLevel > 1.0e-6f)
         fmEnvLevel *= std::pow(fmEnvMul, (float)m);
     }
+    if (!fs.fbFmLive) {
+      fbFmR.skip(m);
+      fbPmPrev = 0.0;
+    }
+
+    const bool weightConst = (weight.inc == 0.0f);
+    const float wNConst = 1.0f + 3.0f * weight.cur;
+    const float invTanhWConst = 1.0f / fastTanh(wNConst);
+    fs.morphConst = (morph.inc == 0.0f);
+    if (fs.wtLive && fs.morphConst)
+      fs.resolvedWt = wt.bank->resolveSlice(morph.cur, curMip, curWLower);
+
+    for (int i = 0; i < m; ++i) {
+      float stealW = 1.0f;
+      if (stealPending) {
+        const float u = (float)stealPos / (float)stealTotal;
+        stealW = 0.5f * (1.0f + fastCos01(0.5f * u));
+        if (++stealPos >= stealTotal) {
+          stealPending = false;
+          note = pendingNote;
+          velocity = pendingVel;
+          targetNote = currentNote = (float)pendingNote;
+          noteBent = currentNote + bend.cur;
+          const float hzNew = midiToHz(noteBent);
+          const float oscHzNew = hzNew * semis(wtTuneR.cur + curDrift * 0.18f);
+          curDt = std::clamp((double)oscHzNew / (double)osr, 1.0e-7, 0.48);
+          curDSub = std::clamp(hzNew / (8.0f * osr), 0.0f, 0.48f);
+          curFmDt = std::min(0.45, curDt * (double)fmRatio);
+          fs.stealAt = i;
+          fs.dtAfterSteal = curDt;
+          subPhase = 0.0;
+          fmPhase = 0.0;
+          fmModPrev = 0.0;
+          fmY1 = fmY2 = 0.0f;
+          ampEnv.reset();
+          filtEnv.reset();
+          ampEnv.noteOn();
+          filtEnv.noteOn();
+          if (lpgMode != 0) {
+            vactrol.strike((double)(1.0f - velAmpLast + velAmpLast * velocity),
+                           true);
+            vactrolVca.snap(0.0f);
+          }
+          fmEnvLevel = 1.0f;
+          velGain.snap(1.0f - velAmpLast + velAmpLast * velocity);
+          if (pendingOff) {
+            ampEnv.noteOff();
+            filtEnv.noteOff();
+            pendingOff = false;
+          }
+          stealW = 0.0f;
+        }
+      }
+
+      const float env = ampEnv.getNextSample();
+      (void)filtEnv.getNextSample();
+      const float vcaEnv = useVactrolVca ? vactrolVca.next() : env;
+      lastEnv = vcaEnv;
+      const float vg = velGain.next();
+
+      const float a = sub1L.next(), b = sub2L.next(), sh1 = sub1S.next(),
+                  sh2 = sub2S.next(), w = weight.next();
+      if (subLive) {
+        const float ph1f = (float)(subPhase * (double)s1Mul);
+        const float ph2f = (float)(subPhase * (double)s2Mul);
+        const float s = subShapeFast(ph1f - (float)(int)ph1f, sh1) * a +
+                        subShapeFast(ph2f - (float)(int)ph2f, sh2) * b;
+        const float wN = weightConst ? wNConst : (1.0f + 3.0f * w);
+        const float invT = weightConst ? invTanhWConst : (1.0f / fastTanh(wN));
+        sub[i] +=
+            fastTanh(s * wN) * invT * 0.36f * vcaEnv * vg * (stealW * stealW);
+      }
+      subPhase += (double)curDSub;
+      if (subPhase >= 1.0)
+        subPhase -= 1.0;
+
+      const float lvl = wtL.next(), mo = morph.next();
+      curPwmV += curPwmInc;
+      fs.pwBuf[i] =
+          pwBase.next() + pwmDepth.next() * 0.44f * curPwmV + curDrift * 0.03f;
+      fs.morphBuf[i] = mo;
+      fs.wtGainBuf[i] = lvl * stealW;
+      double tzfm = 0.0;
+      if (fmLive) {
+        const double x = (double)std::min(
+            1.25f, fmIdx.next() + fmEnvAmt.next() * fmEnvLevel);
+        fmEnvLevel *= fmEnvMul;
+        const float ph = (float)(fmPhase + 0.11 * (double)fmFbR.next() *
+                                               (double)(fmY1 + fmY2));
+        const double y = (double)fastSin01(ph);
+        fmY2 = fmY1;
+        fmY1 = (float)y;
+        const double dMod = y - fmModPrev;
+        fmModPrev = y;
+        fmPhase += curFmDt;
+        if (fmPhase >= 1.0)
+          fmPhase -= 1.0;
+        tzfm = kMaxIndex * x * x * curFmKeyGain * dMod;
+      }
+      fs.tzfmBase[i] = tzfm;
+      if (fs.fbFmLive) {
+        const float fbm = clamp01(fbFmR.next());
+        fs.fbDepthBuf[i] = kFbFmMaxCycles * (double)(fbm * fbm) * curFbFmKeyGain;
+      } else {
+        fs.fbDepthBuf[i] = 0.0;
+      }
+      gainOut[i] = vcaEnv * vg * 0.5f * stealW;
+    }
+  }
+
+  /** Ultra-light 1-sample wavetable + DC-block step inside closed-loop fbFm. */
+  inline float stepOscFbFm(const FbFmSlice &fs, int i, double extFbSat,
+                           bool &stoleNow) noexcept {
+    stoleNow = (i == fs.stealAt);
+    if (stoleNow) {
+      wt.phase = 0.0;
+      oscDc.reset();
+      fbPmPrev = 0.0;
+    }
+    if (!fs.wtLive)
+      return 0.0f;
+    double tzfm = fs.tzfmBase[i];
+    if (fs.fbFmLive) {
+      const double pmTarget = fs.fbDepthBuf[i] * extFbSat;
+      tzfm += (pmTarget - fbPmPrev);
+      fbPmPrev = pmTarget;
+    }
+    const double dtNow = (fs.stealAt >= 0 && i >= fs.stealAt) ? fs.dtAfterSteal : curDt;
+    const float rawOsc =
+        fs.morphConst
+            ? wt.processResolved(dtNow, fs.resolvedWt, fs.pwBuf[i], tzfm)
+            : wt.process(dtNow, curMip, curWLower, fs.morphBuf[i], fs.pwBuf[i],
+                         tzfm);
+    return oscDc.process(rawOsc) * fs.wtGainBuf[i];
+  }
+
+  /** Renders m oversampled samples into contiguous SoA buffers oscOut[m],
+   * gainOut[m], and sums into sub[m] (zero-overhead baseline path when
+   * fbFm==0). */
+  void renderSamples(int m, float *__restrict oscOut, float *__restrict gainOut,
+                     float *__restrict sub) noexcept {
+    constexpr double kMaxIndex = 12.0 / kTwoPiD;
+    const bool subLive = sub1L.cur > 0.0f || sub2L.cur > 0.0f ||
+                         sub1L.inc != 0.0f || sub2L.inc != 0.0f;
+    const bool wtLive = wtL.cur > 0.0f || wtL.inc != 0.0f;
+    const bool fmLive = curFmLive;
+    const bool useVactrolVca = (lpgMode == 1 || lpgMode == 3);
+
+    if (!fmLive) {
+      fmIdx.skip(m);
+      fmEnvAmt.skip(m);
+      fmFbR.skip(m);
+      if (fmOn && fmEnvLevel > 1.0e-6f)
+        fmEnvLevel *= std::pow(fmEnvMul, (float)m);
+    }
+    fbFmR.skip(m);
+    fbPmPrev = 0.0;
 
     const bool weightConst = (weight.inc == 0.0f);
     const float wNConst = 1.0f + 3.0f * weight.cur;
@@ -1124,6 +1881,11 @@ public:
           filtEnv.reset();
           ampEnv.noteOn();
           filtEnv.noteOn();
+          if (lpgMode != 0) {
+            vactrol.strike((double)(1.0f - velAmpLast + velAmpLast * velocity),
+                           true);
+            vactrolVca.snap(0.0f);
+          }
           fmEnvLevel = 1.0f;
           velGain.snap(1.0f - velAmpLast + velAmpLast * velocity);
           if (pendingOff) {
@@ -1137,7 +1899,8 @@ public:
 
       const float env = ampEnv.getNextSample();
       (void)filtEnv.getNextSample();
-      lastEnv = env;
+      const float vcaEnv = useVactrolVca ? vactrolVca.next() : env;
+      lastEnv = vcaEnv;
       const float vg = velGain.next();
 
       const float a = sub1L.next(), b = sub2L.next(), sh1 = sub1S.next(),
@@ -1150,7 +1913,7 @@ public:
         const float wN = weightConst ? wNConst : (1.0f + 3.0f * w);
         const float invT = weightConst ? invTanhWConst : (1.0f / fastTanh(wN));
         sub[i] +=
-            fastTanh(s * wN) * invT * 0.36f * env * vg * (stealW * stealW);
+            fastTanh(s * wN) * invT * 0.36f * vcaEnv * vg * (stealW * stealW);
       }
       subPhase += (double)curDSub;
       if (subPhase >= 1.0)
@@ -1183,7 +1946,7 @@ public:
                         : wt.process(curDt, curMip, curWLower, mo, pw, tzfm))
                  : 0.0f;
       oscOut[i] = wtLive ? oscDc.process(rawOsc) * lvl * stealW : 0.0f;
-      gainOut[i] = env * vg * 0.5f * stealW;
+      gainOut[i] = vcaEnv * vg * 0.5f * stealW;
     }
   }
 
@@ -1195,14 +1958,17 @@ public:
 
   void advanceAge(uint32_t baseSamples) noexcept {
     age += baseSamples;
-    if (!ampEnv.isActive() && !stealPending) {
+    const bool lpgHolding = (lpgMode == 1 || lpgMode == 3) && vactrol.isActive();
+    if (!ampEnv.isActive() && !lpgHolding && !stealPending) {
       active = false;
       note = -1;
       lastEnv = 0.0f;
+      fbPmPrev = 0.0;
     }
   }
 
 private:
+  static constexpr double kFbFmMaxCycles = 2.4 / kTwoPiD;
   static inline float subShapeFast(float ph, float shape) noexcept {
     const float s = fastSin01Unit(ph);
     if (shape <= 1.0e-4f)
@@ -1218,12 +1984,14 @@ private:
   float sr = 48000.0f, osr = 192000.0f;
   uint32_t baseSeed = 101u;
   Adsr ampEnv, filtEnv;
+  VactrolLpg vactrol;
   WavetableOsc wt;
   DcBlocker oscDc;
   Drift drift;
   PinkDrift organicDrift;
   Rng rng;
   double subPhase = 0.0, curDt = 0.001, curFmDt = 0.001, curFmKeyGain = 1.0;
+  double fbPmPrev = 0.0, curFbFmKeyGain = 1.0;
   float pwmPhase = 0.0f, pwmLfo = 0.0f, curPwmV = 0.0f, curPwmInc = 0.0f,
         pan = 0.0f, cutTol = 0.0f;
   float currentNote = 60.0f, targetNote = 60.0f, noteBent = 60.0f,
@@ -1231,12 +1999,13 @@ private:
   float glideCoef = 0.0f, glideM = 0.0f, pwmRate = 0.35f, driftAmt = 0.25f,
         organicAmt = 0.0f, wtTune = 0.0f;
   float curDrift = 0.0f, curDSub = 0.0f, curWLower = 0.0f, velAmpLast = 0.65f;
-  int curMip = 0, s1Mul = 4, s2Mul = 2;
-  bool curFmLive = false;
+  int curMip = 0, s1Mul = 4, s2Mul = 2, lpgMode = 0;
+  bool curFmLive = false, curFbFmLive = false, vactrolStrikePending = false;
   Ramp sub1L, sub2L, sub1S, sub2S, weight, wtL, morph, pwBase, pwmDepth;
   Ramp cutA, cutB, resA, resB, fDrive, envAmt, keyTrack, velGain, bend, wtTuneR,
       spreadPan;
   Ramp fmIdx, fmEnvAmt, fmFbR;
+  Ramp lpgDecayR, lpgStrikeR, fbFmR, vactrolVca;
   bool fmOn = false;
   float fmGate = 0.0f, fmGateAlpha = 0.01f, lastFmDecay = -1.0f,
         lastGlideMs = -1.0f;
@@ -1267,6 +2036,7 @@ public:
     osr = (float)kOs * baseSr;
     ladA.setSampleRate((double)osr);
     ladB.setSampleRate((double)osr);
+    fbBank.setSampleRate((double)osr);
     for (int i = 0; i < kVoices; ++i) {
       voices[(size_t)i].prepare(baseSr, (float)kOs, (uint32_t)(i * 7717 + 101));
       lastCutA[i] = lastCutB[i] = -1.0f;
@@ -1289,8 +2059,11 @@ public:
       voices[(size_t)v].reset();
       ladA.resetLane(v);
       ladB.resetLane(v);
+      fbBank.resetLane(v);
+      fbBank.setLane(v, 0.0, 1, true);
       lastCutA[v] = lastCutB[v] = -1.0f;
     }
+    fbWasActive = false;
     polySmooth.snap(1.0f);
     stackSize = 0;
     sustain = false;
@@ -1376,12 +2149,16 @@ public:
                    int route, bool isCtrlTick, int ctrlSpanOs = kSub) {
     uint32_t activeMask = 0u;
     float envSum = 0.0f;
+    bool anyLpgFilter = false;
+    bool anyFbFilter = false;
+    bool anyFbFm = false;
     for (int v = 0; v < kVoices; ++v) {
       auto &voice = voices[(size_t)v];
       if (!voice.isActive()) {
         if (isCtrlTick) {
           ladA.holdLane(v);
           ladB.holdLane(v);
+          fbBank.holdLane(v);
         }
         continue;
       }
@@ -1397,6 +2174,7 @@ public:
         if (snap) {
           ladA.resetLane(v);
           ladB.resetLane(v);
+          fbBank.resetLane(v);
           voice.ladderSnap = false;
           lastCutA[v] = lastCutB[v] = -1.0f;
         }
@@ -1414,10 +2192,22 @@ public:
         ladB.applyBiasSag(v, gB, kB);
         ladA.setLane(v, gA, kA, (double)drive, ctrlSpanOs, snap);
         ladB.setLane(v, gB, kB, (double)drive, ctrlSpanOs, snap);
+        const float fbRaw = std::clamp(vp[(size_t)v].fbFilter, -1.0f, 1.0f);
+        const double targetFbG =
+            (fbRaw >= 0.0f) ? (1.25 * (double)fbRaw) : (1.35 * (double)fbRaw);
+        fbBank.setLane(v, targetFbG, ctrlSpanOs, snap);
       }
+
+      if (voice.isLpgFilterActive())
+        anyLpgFilter = true;
+      if (std::abs(fbBank.fbG[v]) > 1.0e-6 || std::abs(fbBank.dFbG[v]) > 1.0e-6)
+        anyFbFilter = true;
+      if (voice.isFbFmActive())
+        anyFbFm = true;
     }
+    const bool fltEffOn = fltOn || anyLpgFilter;
     if (activeMask == 0u) {
-      fltFade.snap(fltOn);
+      fltFade.snap(fltEffOn);
       polySmooth.snap(1.0f);
       return;
     }
@@ -1433,47 +2223,212 @@ public:
     alignas(32) float outB[kVoices][kSub];
     float panL[kVoices]{}, panR[kVoices]{};
 
-    for (int v = 0; v < kVoices; ++v) {
-      if ((activeMask & (1u << v)) == 0u)
-        continue;
-      auto &voice = voices[(size_t)v];
-      voice.renderSamples(n2, osc[v], gain[v], sub);
-      voice.pans(panL[v], panR[v]);
-    }
-
-    const bool runFilters = fltOn || !fltFade.settled(fltOn);
+    const bool runFilters = fltEffOn || !fltFade.settled(fltEffOn);
+    const int effRoute = fltOn ? route : 2;
     float (*filtered)[kSub] = osc;
-    if (runFilters) {
-      switch (route) {
-      case 0:
-        ladA.processSoA(osc, outA, n2, activeMask);
-        ladB.processSoA(outA, outB, n2, activeMask);
-        filtered = outB;
-        break;
-      case 1:
-        ladA.processSoA(osc, outA, n2, activeMask);
-        ladB.processSoA(osc, outB, n2, activeMask);
+
+    if (!anyFbFilter && !anyFbFm) {
+      if (fbWasActive) {
+        for (int v = 0; v < kVoices; ++v)
+          fbBank.resetLane(v);
+        fbWasActive = false;
+      }
+      for (int v = 0; v < kVoices; ++v) {
+        if ((activeMask & (1u << v)) == 0u)
+          continue;
+        auto &voice = voices[(size_t)v];
+        voice.renderSamples(n2, osc[v], gain[v], sub);
+        voice.pans(panL[v], panR[v]);
+      }
+
+      if (runFilters) {
+        switch (effRoute) {
+        case 0:
+          ladA.processSoA(osc, outA, n2, activeMask);
+          ladB.processSoA(outA, outB, n2, activeMask);
+          filtered = outB;
+          break;
+        case 1:
+          ladA.processSoA(osc, outA, n2, activeMask);
+          ladB.processSoA(osc, outB, n2, activeMask);
+          for (int v = 0; v < kVoices; ++v) {
+            if ((activeMask & (1u << v)) == 0u)
+              continue;
+            for (int i = 0; i < n2; ++i)
+              outA[v][i] = 0.5f * (outA[v][i] + outB[v][i]);
+          }
+          filtered = outA;
+          break;
+        default:
+          ladA.processSoA(osc, outA, n2, activeMask);
+          filtered = outA;
+          break;
+        }
+      }
+    } else {
+      // Oversampled 64-bit DC-blocked, soft-saturated Audio-Rate Feedback Path
+      // (8-lane auto-vectorized SIMD closed loop inside existing 4x voice OS)
+      fbWasActive = true;
+      std::array<Voice::FbFmSlice, kVoices> fbFmSlices{};
+      if (!anyFbFm) {
         for (int v = 0; v < kVoices; ++v) {
           if ((activeMask & (1u << v)) == 0u)
             continue;
-          for (int i = 0; i < n2; ++i)
-            outA[v][i] = 0.5f * (outA[v][i] + outB[v][i]);
+          auto &voice = voices[(size_t)v];
+          voice.renderSamples(n2, osc[v], gain[v], sub);
+          voice.pans(panL[v], panR[v]);
         }
-        filtered = outA;
-        break;
-      default:
-        ladA.processSoA(osc, outA, n2, activeMask);
-        filtered = outA;
-        break;
+      } else {
+        for (int v = 0; v < kVoices; ++v) {
+          if ((activeMask & (1u << v)) == 0u)
+            continue;
+          auto &voice = voices[(size_t)v];
+          voice.renderPreFbFm(n2, fbFmSlices[(size_t)v], gain[v], sub);
+          voice.pans(panL[v], panR[v]);
+        }
       }
 
-      if (fltFade.settled(fltOn)) {
-        if (!fltOn)
+      const double dcG = fbBank.dcG, dcR = fbBank.dcR, lpA = fbBank.lpA;
+      constexpr double kFbLim = FeedbackBank<kVoices>::kFbLim;
+      constexpr double kInvFbLim = FeedbackBank<kVoices>::kInvFbLim;
+      constexpr double kFbCubic = FeedbackBank<kVoices>::kCubicC;
+      const bool useB = runFilters && (effRoute != 2);
+
+      for (int base = 0; base < kVoices; base += 8) {
+        const uint32_t grpMask = (activeMask >> base) & 0xFFu;
+        if (grpMask == 0u)
+          continue;
+
+        typename LadderBank<kVoices>::GroupState8 gA, gB;
+        if (runFilters) {
+          gA.load(ladA, base, ctrlSpanOs);
+          if (useB)
+            gB.load(ladB, base, ctrlSpanOs);
+        }
+
+        alignas(32) double lDcX1[8], lDcY1[8], lLpZ[8], lFbSat[8], lFbG[8],
+            ldFbG[8];
+        for (int j = 0; j < 8; ++j) {
+          const int l = base + j;
+          lDcX1[j] = fbBank.dcX1[l];
+          lDcY1[j] = fbBank.dcY1[l];
+          lLpZ[j] = fbBank.lpZ[l];
+          lFbSat[j] = fbBank.fbSat[l];
+          lFbG[j] = fbBank.fbG[l];
+          ldFbG[j] = fbBank.dFbG[l];
+        }
+
+        alignas(32) double xinASeq[kSub][8];
+        alignas(32) double xinBSeq[kSub][8];
+
+        for (int i = 0; i < n2; ++i) {
+          alignas(32) double osc8[8]{};
+          if (anyFbFm) {
+            for (int j = 0; j < 8; ++j) {
+              if ((grpMask & (1u << j)) == 0u)
+                continue;
+              const int v = base + j;
+              bool stole = false;
+              const float oS = voices[(size_t)v].stepOscFbFm(
+                  fbFmSlices[(size_t)v], i, lFbSat[j], stole);
+              if (stole) {
+                if (runFilters) {
+                  gA.resetLane(j);
+                  if (useB)
+                    gB.resetLane(j);
+                }
+                lDcX1[j] = lDcY1[j] = lLpZ[j] = lFbSat[j] = 0.0;
+              }
+              osc[v][i] = oS;
+              osc8[j] = (double)oS;
+            }
+          } else {
+            for (int j = 0; j < 8; ++j)
+              if ((grpMask & (1u << j)) != 0u)
+                osc8[j] = (double)osc[base + j][i];
+          }
+
+          alignas(32) double xinA[8];
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+          for (int j = 0; j < 8; ++j) {
+            lFbG[j] += ldFbG[j];
+            const double xa = osc8[j] + lFbG[j] * lFbSat[j];
+            xinA[j] = xa;
+            xinASeq[i][j] = xa;
+          }
+
+          alignas(32) double yout8[8];
+          if (runFilters) {
+            if (effRoute == 0) {
+              alignas(32) double mid8[8];
+              gA.step(xinA, mid8);
+              for (int j = 0; j < 8; ++j)
+                xinBSeq[i][j] = mid8[j];
+              gB.step(mid8, yout8);
+            } else if (effRoute == 1) {
+              alignas(32) double yA8[8], yB8[8];
+              gA.step(xinA, yA8);
+              gB.step(xinA, yB8);
+              for (int j = 0; j < 8; ++j) {
+                xinBSeq[i][j] = xinA[j];
+                yout8[j] = 0.5 * (yA8[j] + yB8[j]);
+              }
+            } else {
+              gA.step(xinA, yout8);
+            }
+          } else {
+            for (int j = 0; j < 8; ++j)
+              yout8[j] = osc8[j];
+          }
+
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+          for (int j = 0; j < 8; ++j) {
+            const double y = yout8[j];
+            const double dc = dcG * (y - lDcX1[j]) + dcR * lDcY1[j];
+            lDcX1[j] = y;
+            lDcY1[j] = dc;
+            lLpZ[j] += lpA * (dc - lLpZ[j]);
+            const double u = lLpZ[j] * kInvFbLim;
+            const double uc = u < -1.5 ? -1.5 : (u > 1.5 ? 1.5 : u);
+            lFbSat[j] = kFbLim * uc * (1.0 - kFbCubic * uc * uc);
+          }
+
+          for (int j = 0; j < 8; ++j)
+            outB[base + j][i] = (float)yout8[j];
+        }
+
+        if (runFilters) {
+          gA.store(ladA, base);
+          ladA.updateBiasGroup8(base, xinASeq, n2);
+          if (useB) {
+            gB.store(ladB, base);
+            ladB.updateBiasGroup8(base, xinBSeq, n2);
+          }
+        }
+        for (int j = 0; j < 8; ++j) {
+          const int l = base + j;
+          fbBank.dcX1[l] = flushDenormal(lDcX1[j]);
+          fbBank.dcY1[l] = flushDenormal(lDcY1[j]);
+          fbBank.lpZ[l] = flushDenormal(lLpZ[j]);
+          fbBank.fbSat[l] = flushDenormal(lFbSat[j]);
+          fbBank.fbG[l] = lFbG[j];
+        }
+      }
+      filtered = runFilters ? outB : osc;
+    }
+
+    if (runFilters) {
+      if (fltFade.settled(fltEffOn)) {
+        if (!fltEffOn)
           filtered = osc;
       } else {
         float fg[kSub];
         for (int i = 0; i < n2; ++i)
-          fg[i] = fltFade.next(fltOn);
+          fg[i] = fltFade.next(fltEffOn);
         for (int v = 0; v < kVoices; ++v) {
           if ((activeMask & (1u << v)) == 0u)
             continue;
@@ -1585,6 +2540,8 @@ private:
 
   std::array<Voice, kVoices> voices;
   LadderBank<kVoices> ladA, ladB;
+  FeedbackBank<kVoices> fbBank;
+  bool fbWasActive = false;
   float lastCutA[kVoices]{}, lastCutB[kVoices]{};
   double cachedGA[kVoices]{}, cachedGB[kVoices]{};
   BypassFade fltFade;

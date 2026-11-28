@@ -40,6 +40,7 @@ int pidForId (const juce::String& id) noexcept
 
 Stage stageOf (int pid) noexcept
 {
+    if (pid >= v2_lpg_mode && pid <= v2_fb_fm) return Stage::Shape;
     if (isV2ControlParam (pid)) return Stage::Mod;
     if (pid >= v2_tex_mode && pid <= v2_tex_drive) return Stage::Source;
     if (pid >= v2_organic_amt && pid <= v2_organic_mono) return Stage::Voice;
@@ -91,6 +92,10 @@ const std::vector<int>& modDestinations()
                 v.push_back (i);
         // then V2 Organic & Procedural Texture parameters (append-only)
         for (int i = v2_organic_amt; i <= v2_tex_drive; ++i)
+            if (kSpecs[i].type == PType::Float)
+                v.push_back (i);
+        // then V2 Vactrol LPG & Audio-Rate Feedback parameters (append-only)
+        for (int i = v2_lpg_mode; i <= v2_fb_fm; ++i)
             if (kSpecs[i].type == PType::Float)
                 v.push_back (i);
         return v;

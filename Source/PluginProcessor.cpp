@@ -205,7 +205,8 @@ void VesselProcessor::snapToCurrentState()
     convMixS.snap (pb (conv_on) ? pv (conv_mix) : 0.0f);
     resonator.snapModel (pc (res_model));
     voices.setMode (pc (voice_mode));   // before any note of the first block (a bounce starting on a note)
-    voices.snapFilter (pb (flt_on));
+    const int lpgM = pc (v2_lpg_mode);
+    voices.snapFilter (pb (flt_on) || lpgM == 1 || lpgM == 2);
     const bool tubeActive = pb (tube_on) && (pv (tube_drive) > 1.0e-5f || std::abs (pv (tube_bias)) > 1.0e-5f || std::abs (pv (tube_out)) > 1.0e-4f);
     const bool biasActive = pb (bias_on) && (pv (bias_sat) > 1.0e-5f || std::abs (pv (bias_amount)) > 1.0e-5f || pv (bias_sag) > 1.0e-5f);
     ruin.snap (tubeActive, biasActive);
@@ -591,6 +592,7 @@ bool isVoiceParam (int pid)
         case fm_fine: case fm_index: case fm_feedback: case fm_env: case fm_decay: case fm_key:
         case amp_a: case amp_d: case amp_s: case amp_r: case fenv_a: case fenv_d: case fenv_s: case fenv_r: case glide:
         case v2_organic_amt:
+        case v2_lpg_decay: case v2_lpg_strike: case v2_fb_filter: case v2_fb_fm:
             return true;
         default: return false;
     }
@@ -620,6 +622,10 @@ void setVoiceField (VoiceParams& v, int pid, float x, float tuneWithoutFine)
         case fm_feedback: v.fmFb = x; break;        case fm_env:   v.fmEnv = x; break;
         case fm_decay: v.fmDecay = x; break;        case fm_key:   v.fmKey = x; break;
         case v2_organic_amt: v.organicAmt = x; break;
+        case v2_lpg_decay:   v.lpgDecay = x; break;
+        case v2_lpg_strike:  v.lpgStrike = x; break;
+        case v2_fb_filter:   v.fbFilter = x; break;
+        case v2_fb_fm:       v.fbFm = x; break;
         default: break;
     }
 }
@@ -771,6 +777,11 @@ void VesselProcessor::buildVoiceParams()
     vp.bend = globalBendSt;
     vp.velAmp = pv (vel_amp);
     vp.organicAmt = pv (v2_organic_amt);
+    vp.lpgMode = pc (v2_lpg_mode);
+    vp.lpgDecay = pv (v2_lpg_decay);
+    vp.lpgStrike = pv (v2_lpg_strike);
+    vp.fbFilter = pv (v2_fb_filter);
+    vp.fbFm = pv (v2_fb_fm);
 
     struct VoiceRoute { int dest = -1; float amt = 0.0f; int srcKind = 0; };
     VoiceRoute routes[6];
@@ -938,7 +949,8 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
             }
             else
             {
-                voices.snapFilter (pb (flt_on));
+                const int lpgM = pc (v2_lpg_mode);
+                voices.snapFilter (pb (flt_on) || lpgM == 1 || lpgM == 2);
             }
         }
 
@@ -985,7 +997,8 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         std::fill_n (bodyL.data(), n, 0.0f);
         std::fill_n (bodyR.data(), n, 0.0f);
         std::fill_n (subB.data(),  n, 0.0f);
-        voices.snapFilter (pb (flt_on));
+        const int lpgM = pc (v2_lpg_mode);
+        voices.snapFilter (pb (flt_on) || lpgM == 1 || lpgM == 2);
     }
     std::fill_n (texL.data(), n, 0.0f); std::fill_n (texR.data(), n, 0.0f);
 

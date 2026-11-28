@@ -428,7 +428,13 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (v2_breath_dest1,  "Breath Dest A",  Choice, 0, 1, 0,     0, 1, None, "@dest") \
     F (v2_breath_amt1,   "Breath Amt A",   Float, -1, 1, 0.0f,  0, 0, Bip, "") \
     F (v2_breath_dest2,  "Breath Dest B",  Choice, 0, 1, 0,     0, 1, None, "@dest") \
-    F (v2_breath_amt2,   "Breath Amt B",   Float, -1, 1, 0.0f,  0, 0, Bip, "")
+    F (v2_breath_amt2,   "Breath Amt B",   Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    /* ── V2 Boutique Analog Realism: Vactrol LPG & Audio-Rate Feedback (append-only, Off/0% default) ── */ \
+    F (v2_lpg_mode,      "Vactrol LPG",    Choice, 0, 3, 0,     0, 1, None, "Off|Both|LPF|VCA") \
+    F (v2_lpg_decay,     "LPG Ring",       Float,  0, 1, 0.45f, 0, 0, Pct, "") \
+    F (v2_lpg_strike,    "LPG Strike",     Float,  0, 1, 0.65f, 0, 0, Pct, "") \
+    F (v2_fb_filter,     "Filter Feedback",Float, -1, 1, 0.0f,  0, 0, Bip, "") \
+    F (v2_fb_fm,         "Filter to FM",   Float,  0, 1, 0.0f,  0, 0, Pct, "")
 
 enum PID : int
 {

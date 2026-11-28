@@ -1067,10 +1067,233 @@ GateResult runGate4()
     res.details.push_back ("Driven Nonlinear Filters (C6 & 6kHz): alias=" + fmt (worstFltAlias, 1)
                            + " dBc (lim<-75), DC=" + fmt (worstFltDc, 1) + " dBFS (lim<-90) [" + (fltAliasOk ? "OK" : "FAIL") + "]");
 
+    // Part E: Vactrol Low-Pass Gate (fast attack, sluggish two-stage curved release, coupled cutoff & VCA,
+    // sample-rate invariance across 44.1-192 kHz, clean idle tail, 0 added latency)
+    bool lpgOk = true;
+    double lpgRiseMs = 0.0, lpgCurveRatio = 0.0, lpgCentRatio = 0.0, lpgSrSpread = 0.0;
+    {
+        double refPeak = -1.0, refMid = -1.0;
+        for (double rSr : { 44100.0, 48000.0, 96000.0, 192000.0 })
+        {
+            dsp::VactrolLpg vac;
+            vac.strike (1.0, true);
+            const double dt = 8.0 / rSr;
+            const int nSteps = (int) std::ceil (6.0 / dt);
+            double peak = 0.0, mid60 = 0.0;
+            double tPeak = 0.0, t90 = -1.0, t80 = -1.0, t40 = -1.0, t25 = -1.0, t0625 = -1.0;
+            std::vector<double> envCurve;
+            envCurve.reserve ((size_t) std::min (nSteps, 60000));
+            for (int s = 0; s < nSteps; ++s)
+            {
+                vac.advance (dt, 0.0, 0.50, 1.0);
+                const double g = vac.conductance();
+                if (! std::isfinite (g)) lpgOk = false;
+                if (g > peak) { peak = g; tPeak = (double) (s + 1) * dt; }
+                if (std::abs ((double) (s + 1) * dt - 0.060) < 0.6 * dt) mid60 = g;
+                if (s < 60000) envCurve.push_back (g);
+            }
+            if (vac.conductance() > 1.0e-5 || vac.isActive()) lpgOk = false;
+            for (size_t s = 0; s < envCurve.size(); ++s)
+            {
+                const double t = (double) (s + 1) * dt;
+                const double g = envCurve[s];
+                if (t90 < 0.0 && g >= 0.90 * peak) t90 = t;
+                if (t > tPeak)
+                {
+                    if (t80 < 0.0 && g <= 0.80 * peak) t80 = t;
+                    if (t40 < 0.0 && g <= 0.40 * peak) t40 = t;
+                    if (t25 < 0.0 && g <= 0.25 * peak) t25 = t;
+                    if (t0625 < 0.0 && g <= 0.0625 * peak) t0625 = t;
+                }
+            }
+            const double tEarly = (t40 > t80 && t80 > 0.0) ? (t40 - t80) : 0.0;
+            const double tLate  = (t0625 > t25 && t25 > 0.0) ? (t0625 - t25) : 0.0;
+            const double ratio  = (tEarly > 1.0e-6) ? (tLate / (2.0 * tEarly)) : 0.0;
+            if (std::abs (rSr - 48000.0) < 1.0)
+            {
+                lpgRiseMs = t90 * 1000.0;
+                lpgCurveRatio = ratio;
+            }
+            if (refPeak < 0.0) { refPeak = peak; refMid = mid60; }
+            else lpgSrSpread = std::max ({ lpgSrSpread, std::abs (peak - refPeak), std::abs (mid60 - refMid) });
+            if (t90 < 0.0 || t90 * 1000.0 > 6.0 || ratio < 2.0) lpgOk = false;
+        }
+
+        // End-to-end VesselProcessor LPG Both mode: coupled filter darkening + VCA ring, 0 latency, DC < -90 dBFS
+        auto p = makeProcessor (sr, 512);
+        setCleanDryPatch (*p);
+        setP (*p, wt_morph, 2.0f / 7.0f);   // bright saw
+        setP (*p, flt_on, 1.0f);
+        setP (*p, flt_route, 2.0f);
+        setP (*p, flt_a_cut, 5000.0f);
+        setP (*p, flt_a_res, 0.35f);
+        setP (*p, flt_env, 0.0f);
+        setP (*p, v2_lpg_mode, 1.0f);       // Both (coupled cutoff + VCA)
+        setP (*p, v2_lpg_decay, 0.45f);
+        setP (*p, v2_lpg_strike, 1.0f);
+        p->prepareToPlay (sr, 512);
+        if (p->getLatencySamples() != 0) lpgOk = false;
+        auto r = renderEvents (*p, sr, (int) (0.6 * sr), { 512 }, {
+            { 0, juce::MidiMessage::noteOn (1, 48, 0.95f) },
+            { (int) (0.04 * sr), juce::MidiMessage::noteOff (1, 48) }
+        });
+        if (r.nonFiniteCount > 0) lpgOk = false;
+        const double lpgDc = windowedDcDbfs (r.l, 0, r.l.size());
+        if (lpgDc >= -90.0) lpgOk = false;
+        auto centOf = [&] (size_t off, int ord)
+        {
+            const int N = 1 << ord;
+            auto sp = bhSpectrumPow (r.l, off, ord);
+            const double binHz = sr / (double) N;
+            double num = 0.0, den = 0.0;
+            for (int k = 1; k < N / 2; ++k) { const double m = std::sqrt (sp[(size_t) k]); num += ((double) k * binHz) * m; den += m; }
+            return den > 1.0e-12 ? num / den : 0.0;
+        };
+        const double cEarly = centOf (64, 10);                  // ~1..22 ms bright transient
+        const double cTail  = centOf ((size_t) (0.10 * sr), 12); // ~100..185 ms warm darkened ring
+        lpgCentRatio = (cTail > 1.0) ? (cEarly / cTail) : 0.0;
+        if (lpgCentRatio < 1.8 || lpgSrSpread > 0.025) lpgOk = false;
+    }
+    if (! lpgOk) res.status = GateStatus::Fail;
+    res.details.push_back ("Vactrol LPG (44.1..192k): rise90=" + fmt (lpgRiseMs, 2) + " ms, 2-stageRatio=" + fmt (lpgCurveRatio, 2)
+                           + "x, centDrop=" + fmt (lpgCentRatio, 2) + "x, srSpread=" + fmt (lpgSrSpread, 4) + " [" + (lpgOk ? "OK" : "FAIL") + "]");
+
+    // Part F: Oversampled DC-Blocked Audio-Rate Feedback Path (44.1-192k stability, self-oscillation,
+    // C6/6kHz aliasing < -75 dBc, DC < -90 dBFS, odd-block < -100 dBFS, 0 added latency)
+    bool fbOk = true;
+    double fbWorstAlias = -300.0, fbWorstDc = -300.0, fbMaxPk = 0.0, fbOddResDb = -300.0;
+    {
+        // 1) Multi-rate extreme stress & musical self-oscillation across 44.1, 48, 96, 192 kHz
+        for (double rSr : { 44100.0, 48000.0, 96000.0, 192000.0 })
+        {
+            const int nTot = (int) (0.70 * rSr);
+            const size_t dcStart = (size_t) (0.25 * rSr);
+            const size_t dcLen   = (size_t) (0.45 * rSr);
+            for (float fbSign : { -1.0f, 1.0f })
+            {
+                auto p = makeProcessor (rSr, 512);
+                setCleanDryPatch (*p);
+                setP (*p, wt_level, 0.55f);
+                setP (*p, flt_on, 1.0f);
+                setP (*p, flt_route, 0.0f);   // Serial dual ladders
+                setP (*p, flt_a_cut, 1200.0f);
+                setP (*p, flt_a_res, 0.85f);
+                setP (*p, flt_b_cut, 3600.0f);
+                setP (*p, flt_b_res, 0.65f);
+                setP (*p, flt_drive, 0.75f);
+                setP (*p, flt_env, 0.0f);
+                setP (*p, v2_fb_filter, fbSign);
+                setP (*p, v2_fb_fm, 0.80f);
+                p->prepareToPlay (rSr, 512);
+                if (p->getLatencySamples() != 0) fbOk = false;
+                auto r = renderEvents (*p, rSr, nTot, { 512 }, { { 0, juce::MidiMessage::noteOn (1, 52, 0.9f) } });
+                if (r.nonFiniteCount > 0) fbOk = false;
+                for (float v : r.l) fbMaxPk = std::max (fbMaxPk, (double) std::abs (v));
+                const double dc = windowedDcDbfs (r.l, dcStart, dcLen);
+                fbWorstDc = std::max (fbWorstDc, dc);
+                if (fbMaxPk > 6.0 || dc >= -90.0) fbOk = false;
+            }
+            // Self-oscillation stability via inverted post-filter feedback at moderate resonance (res=0.65)
+            {
+                auto p = makeProcessor (rSr, 512);
+                setCleanDryPatch (*p);
+                setP (*p, wt_level, 0.03f);
+                setP (*p, flt_on, 1.0f);
+                setP (*p, flt_route, 2.0f);
+                setP (*p, flt_a_cut, 1000.0f);
+                setP (*p, flt_a_res, 0.65f);
+                setP (*p, flt_drive, 0.35f);
+                setP (*p, flt_env, 0.0f);
+                setP (*p, v2_fb_filter, -0.95f);
+                p->prepareToPlay (rSr, 512);
+                auto r = renderEvents (*p, rSr, nTot, { 512 }, { { 0, juce::MidiMessage::noteOn (1, 60, 0.8f) } });
+                if (r.nonFiniteCount > 0) fbOk = false;
+                double sq = 0.0;
+                const size_t st = (size_t) (nTot / 2);
+                for (size_t i = st; i < r.l.size(); ++i) sq += (double) r.l[i] * r.l[i];
+                const double rmsDb = linToDb (std::sqrt (sq / (double) (r.l.size() - st)));
+                if (rmsDb < -38.0 || rmsDb > 6.0) fbOk = false;
+            }
+        }
+
+        // 2) Driven Audio-Rate Feedback Aliasing (< -75 dBc) & DC (< -90 dBFS) at C6 (1046.5 Hz) & ~6 kHz (MIDI 114)
+        const int totalFb = (int) (1.6 * sr);
+        struct FbAliasCase { int midi; float morph; float cut; float fbFlt; float fbFm; };
+        const FbAliasCase fbCases[] {
+            { 84,  2.0f / 7.0f,  6000.0f, -0.55f, 0.00f },   // Filter FB C6 saw
+            { 114, 0.0f,        12000.0f, -0.55f, 0.00f },   // Filter FB ~6kHz sine
+            { 84,  2.0f / 7.0f,  6000.0f,  0.30f, 0.45f },   // Filter+FM FB C6 saw
+            { 114, 0.0f,        12000.0f,  0.30f, 0.45f },   // Filter+FM FB ~6kHz sine
+        };
+        for (const auto& c : fbCases)
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, wt_level, 0.55f);
+            setP (*p, wt_morph, c.morph);
+            setP (*p, flt_on, 1.0f);
+            setP (*p, flt_route, 2.0f);
+            setP (*p, flt_a_cut, c.cut);
+            setP (*p, flt_a_res, 0.40f);
+            setP (*p, flt_drive, 0.40f);
+            setP (*p, flt_env, 0.0f);
+            setP (*p, flt_key, 0.0f);
+            setP (*p, v2_fb_filter, c.fbFlt);
+            setP (*p, v2_fb_fm, c.fbFm);
+            p->prepareToPlay (sr, 512);
+            auto r = renderEvents (*p, sr, totalFb, { 512 }, { { 0, juce::MidiMessage::noteOn (1, c.midi, 1.0f) } });
+            if (r.nonFiniteCount > 0) fbOk = false;
+            const auto am = measureHarmonicAliasing (r.l, sr, midiToHzD (c.midi));
+            fbWorstAlias = std::max (fbWorstAlias, am.aliasedDbc);
+            fbWorstDc = std::max (fbWorstDc, am.dcDbfs);
+        }
+        if (fbWorstAlias >= -75.0 || fbWorstDc >= -90.0) fbOk = false;
+
+        // 3) Odd-block invariance with BOTH Vactrol LPG + Audio-Rate Filter/FM Feedback active
+        auto setupLpgFb = [] (VesselProcessor& p)
+        {
+            setCleanDryPatch (p);
+            setP (p, flt_on, 1.0f);
+            setP (p, flt_route, 0.0f);
+            setP (p, flt_a_cut, 2600.0f);
+            setP (p, flt_a_res, 0.45f);
+            setP (p, flt_drive, 0.45f);
+            setP (p, v2_lpg_mode, 1.0f);
+            setP (p, v2_lpg_decay, 0.50f);
+            setP (p, v2_lpg_strike, 0.85f);
+            setP (p, v2_fb_filter, -0.50f);
+            setP (p, v2_fb_fm, 0.40f);
+            maybeSeedQa (p, 0x5EED4242u);
+        };
+        const int nOdd = (int) (0.5 * sr);
+        const std::vector<MidiEvent> evOdd {
+            { 0, juce::MidiMessage::noteOn (1, 48, 0.9f) },
+            { 4000, juce::MidiMessage::noteOn (1, 55, 0.8f) },
+            { 14000, juce::MidiMessage::noteOff (1, 48) },
+        };
+        auto pR = makeProcessor (sr, 512); setupLpgFb (*pR); pR->prepareToPlay (sr, 512); maybeSeedQa (*pR, 0x5EED4242u);
+        auto rR = renderEvents (*pR, sr, nOdd, { 512 }, evOdd);
+        auto pO = makeProcessor (sr, 2048); setupLpgFb (*pO); pO->prepareToPlay (sr, 2048); maybeSeedQa (*pO, 0x5EED4242u);
+        auto rO = renderEvents (*pO, sr, nOdd, { 0, 1, 7, 13, 64, 137, 2048 }, evOdd);
+        double dSq = 0.0;
+        for (int i = 0; i < nOdd; ++i)
+        {
+            const double dl = (double) rR.l[(size_t) i] - (double) rO.l[(size_t) i];
+            const double dr = (double) rR.r[(size_t) i] - (double) rO.r[(size_t) i];
+            dSq += 0.5 * (dl * dl + dr * dr);
+        }
+        fbOddResDb = linToDb (std::sqrt (dSq / (double) nOdd));
+        if (rO.nonFiniteCount > 0 || fbOddResDb >= -100.0) fbOk = false;
+    }
+    if (! fbOk) res.status = GateStatus::Fail;
+    res.details.push_back ("Audio-Rate Feedback (44.1..192k, C6/6k): pk=" + fmt (fbMaxPk, 2) + ", alias=" + fmt (fbWorstAlias, 1)
+                           + " dBc (lim<-75), DC=" + fmt (fbWorstDc, 1) + " dBFS (lim<-90), oddRes=" + fmt (fbOddResDb, 1)
+                           + " dBFS [" + (fbOk ? "OK" : "FAIL") + "]");
+
     res.summary = "modStab=" + std::string (stabOk ? "OK" : "FAIL")
                 + ", SVF=" + fmt (maxSvfCents, 2) + "ct, Lad=" + fmt (maxLadCents, 2)
                 + "ct, SK=" + fmt (maxSkCents, 2) + "ct, rateDiff=" + fmt (maxLadRateDiffDb, 3)
-                + "dB, nlAlias=" + fmt (worstFltAlias, 1) + "dBc, DC=" + fmt (worstFltDc, 1) + "dBFS";
+                + "dB, nlAlias=" + fmt (std::max (worstFltAlias, fbWorstAlias), 1) + "dBc, DC=" + fmt (std::max (worstFltDc, fbWorstDc), 1) + "dBFS";
     return res;
 }
 
@@ -1533,6 +1756,65 @@ GateResult runGate8 (bool ciVmMode)
 
     const bool ok = (activeVoices == dsp::VoiceManager::kVoices) && (ciVmMode || (rtPct < 15.0));
     if (! ok) res.status = GateStatus::Fail;
+
+    // Also measure 16-voice Release CPU delta with Vactrol LPG + Audio-Rate Feedback active (lim < +2.5% RT)
+    double lpgFbRtPct = 0.0, cpuDeltaPct = 0.0;
+    {
+        auto pFb = makeProcessor (sr, blk);
+        setCleanDryPatch (*pFb);
+        setP (*pFb, sub_on, 1.0f);
+        setP (*pFb, wt_on, 1.0f);
+        setP (*pFb, wt_morph, 0.45f);
+        setP (*pFb, wt_pwm, 0.35f);
+        setP (*pFb, wt_drift, 0.25f);
+        setP (*pFb, fm_on, 1.0f);
+        setP (*pFb, fm_index, 0.45f);
+        setP (*pFb, flt_on, 1.0f);
+        setP (*pFb, flt_route, 0.0f);
+        setP (*pFb, flt_a_cut, 1600.0f);
+        setP (*pFb, flt_a_res, 0.45f);
+        setP (*pFb, flt_b_cut, 4200.0f);
+        setP (*pFb, flt_b_res, 0.35f);
+        setP (*pFb, flt_drive, 0.4f);
+        setP (*pFb, v2_lpg_mode, 1.0f);
+        setP (*pFb, v2_lpg_decay, 0.60f);
+        setP (*pFb, v2_lpg_strike, 0.35f);
+        setP (*pFb, v2_fb_filter, -0.55f);
+        setP (*pFb, v2_fb_fm, 0.35f);
+        setP (*pFb, tube_on, 1.0f);
+        setP (*pFb, tube_drive, 0.45f);
+        setP (*pFb, bias_on, 1.0f);
+        setP (*pFb, verb_on, 1.0f);
+        setP (*pFb, ott_on, 1.0f);
+        setP (*pFb, mono_on, 1.0f);
+        setP (*pFb, clip_on, 1.0f);
+        setP (*pFb, amp_a, 5.0f);
+        setP (*pFb, amp_s, 1.0f);
+        setP (*pFb, amp_r, 2000.0f);
+        pFb->prepareToPlay (sr, blk);
+
+        buf.clear();
+        pFb->processBlock (buf, chordMidi);
+        for (int w = 0; w < 32; ++w) { buf.clear(); pFb->processBlock (buf, emptyMidi); }
+        std::vector<double> usFb;
+        usFb.reserve (kBlocks);
+        for (int b = 0; b < kBlocks; ++b)
+        {
+            buf.clear();
+            const auto t0 = std::chrono::steady_clock::now();
+            pFb->processBlock (buf, emptyMidi);
+            const auto t1 = std::chrono::steady_clock::now();
+            usFb.push_back (std::chrono::duration<double, std::micro> (t1 - t0).count());
+        }
+        std::sort (usFb.begin(), usFb.end());
+        lpgFbRtPct = usFb[usFb.size() / 2] / blockBudgetUs * 100.0;
+        cpuDeltaPct = lpgFbRtPct - rtPct;
+        const bool deltaOk = ciVmMode || (cpuDeltaPct < 2.5);
+        if (! deltaOk) res.status = GateStatus::Fail;
+        res.details.push_back ("LPG+Feedback 16v stress: median=" + fmt (usFb[usFb.size() / 2], 1) + " us ("
+                               + fmt (lpgFbRtPct, 2) + "% RT, delta=" + (cpuDeltaPct >= 0.0 ? "+" : "")
+                               + fmt (cpuDeltaPct, 2) + "% RT, lim<+2.5%) [" + (deltaOk ? "OK" : "FAIL") + "]");
+    }
 #ifndef NDEBUG
     res.details.push_back ("WARNING: Built without NDEBUG (not Release -O3)");
 #endif
@@ -1540,7 +1822,8 @@ GateResult runGate8 (bool ciVmMode)
                            + " voices, 240x512 @48k): median=" + fmt (medUs, 1) + " us (" + fmt (rtPct, 2)
                            + "% RT, " + std::string (ciVmMode ? "CI-VM info" : "lim<15.0%") + "), p95=" + fmt (p95Us, 1)
                            + " us (" + fmt (p95Pct, 2) + "% RT) [" + (ok ? "OK" : "FAIL") + "]");
-    res.summary = std::to_string (activeVoices) + "v median=" + fmt (medUs, 1) + "us (" + fmt (rtPct, 2) + "% RT), p95=" + fmt (p95Pct, 2) + "% RT";
+    res.summary = std::to_string (activeVoices) + "v median=" + fmt (medUs, 1) + "us (" + fmt (rtPct, 2)
+                + "% RT), lpg+fb=" + fmt (lpgFbRtPct, 2) + "% (d=" + (cpuDeltaPct >= 0.0 ? "+" : "") + fmt (cpuDeltaPct, 2) + "%), p95=" + fmt (p95Pct, 2) + "% RT";
     return res;
 }
 
