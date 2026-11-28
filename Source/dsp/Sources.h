@@ -191,12 +191,13 @@ public:
         if (! p.on && hissR.cur <= 0.0f && humR.cur <= 0.0f && crackR.cur <= 0.0f) return;
         if (isCtrlTick)
         {
-            const float toneHz = 1500.0f * fastExp2 (p.tone * 3.6f);
-            for (int c = 0; c < 2; ++c) { toneLp[c].setup (toneHz, 0.6f, sr); popLp[c].setup (toneHz, 0.7f, sr); }
+            // Warm analog tape/acetate ceiling (1.1 - 9.4 kHz) so dust never turns into brittle digital fizz
+            const float toneHz = 1100.0f * fastExp2 (p.tone * 3.1f);
+            for (int c = 0; c < 2; ++c) { toneLp[c].setup (toneHz, 0.55f, sr); popLp[c].setup (toneHz * 0.85f, 0.62f, sr); }
         }
 
-        const float popRate = p.crackle * p.crackle * 70.0f / sr;
-        const float dustRate = p.crackle * 400.0f / sr;
+        const float popRate = p.crackle * p.crackle * 65.0f / sr;
+        const float dustRate = p.crackle * 320.0f / sr;
 
         for (int i = 0; i < n; ++i)
         {
@@ -217,19 +218,21 @@ public:
                 float il = 0.0f, ir = 0.0f;
                 if (rng.uni() < popRate)
                 {
-                    const float a = std::pow (rng.uni(), 2.5f) * 3.0f * (rng.uni() < 0.5f ? -1.0f : 1.0f);
+                    const float a = std::pow (rng.uni(), 2.5f) * 1.45f * (rng.uni() < 0.5f ? -1.0f : 1.0f);
                     const float pan = rng.uni();
                     il = a * std::sqrt (1.0f - pan); ir = a * std::sqrt (pan);
-                    const float fc = 700.0f + rng.uni() * 5200.0f;
-                    ring[0].setup (fc, 2.5f, sr); ring[1].setup (fc * 1.07f, 2.5f, sr);
+                    const float fc = 550.0f + rng.uni() * 2800.0f;
+                    ring[0].setup (fc, 1.6f, sr); ring[1].setup (fc * 1.07f, 1.6f, sr);
                 }
                 if (rng.uni() < dustRate)
                 {
-                    const float a = rng.bip() * 0.25f;
+                    const float a = rng.bip() * 0.13f;
                     if (rng.uni() < 0.5f) il += a; else ir += a;
                 }
-                l += popLp[0].lowpass (il * 0.6f + ring[0].bandpass (il)) * crackG;
-                r += popLp[1].lowpass (ir * 0.6f + ring[1].bandpass (ir)) * crackG;
+                const float cl = fastTanh (il * 0.30f + ring[0].bandpass (il) * 0.75f);
+                const float cr = fastTanh (ir * 0.30f + ring[1].bandpass (ir) * 0.75f);
+                l += popLp[0].lowpass (cl) * crackG;
+                r += popLp[1].lowpass (cr) * crackG;
             }
 
             if (humG > 0.0f)

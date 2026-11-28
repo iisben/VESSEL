@@ -865,7 +865,7 @@ void Header::paint (juce::Graphics& g)
        #ifdef JucePlugin_VersionString
         const juce::String verText = "v" + juce::String (JucePlugin_VersionString);
        #else
-        const juce::String verText = "v2.0.4";
+        const juce::String verText = "v2.0.5";
        #endif
         const float byW = type::width (type::display (14.0f), "by iisben");
         const auto vf = type::value (10.5f);
@@ -952,8 +952,8 @@ MasterRail::MasterRail (VesselProcessor& p, Registry& reg) : proc (p)
     clip->row ({ &clip->halo (clip_ceiling, "Ceiling"), &clip->halo (out_gain, "Output"), &clip->halo (in_level, "Input") }, H);
     exciter = std::make_unique<ModuleColumn> (p, reg, "Exciter", "24", exc_on);
     exciter->row ({ &exciter->halo (exc_freq, "Above"), &exciter->halo (exc_amount, "Amount"), &exciter->halo (exc_harm, "Bite") }, H);
-    mono = std::make_unique<ModuleColumn> (p, reg, "Mono Below", "22", mono_on);
-    mono->row ({ &mono->halo (mono_freq, "Collapse") }, H);
+    mono = std::make_unique<ModuleColumn> (p, reg, "Mono & Tone", "22", mono_on);
+    mono->row ({ &mono->halo (mono_freq, "Mono Hz"), &mono->halo (v2_out_cut, "Out Cut"), &mono->halo (v2_out_res, "Out Res") }, H);
     for (auto* c : { clip.get(), exciter.get(), mono.get() }) addAndMakeVisible (*c);
 }
 

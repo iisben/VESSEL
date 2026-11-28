@@ -126,6 +126,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         bodyDc1[c].setup (12.0, 0.54119610, sampleRate); bodyDc1[c].reset();
         bodyDc2[c].setup (12.0, 1.30656296, sampleRate); bodyDc2[c].reset();
     }
+    masterFilter.prepare (fs);
     outStage.prepare (fs, kChunk);
     subAlign.prepare (256);
     convMixS.prepare (fs, 30.0f); convMixS.snap (0.0f);
@@ -219,6 +220,7 @@ void VesselProcessor::snapToCurrentState()
     const bool tubeActive = pb (tube_on) && (pv (tube_drive) > 1.0e-5f || std::abs (pv (tube_bias)) > 1.0e-5f || std::abs (pv (tube_out)) > 1.0e-4f);
     const bool biasActive = pb (bias_on) && (pv (bias_sat) > 1.0e-5f || std::abs (pv (bias_amount)) > 1.0e-5f || pv (bias_sag) > 1.0e-5f);
     ruin.snap (tubeActive, biasActive);
+    masterFilter.snap (pv (v2_out_cut), pv (v2_out_res));
     outStage.snap (pb (exc_on), pb (clip_on));
 }
 
@@ -1253,6 +1255,8 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         OrganicBus::Params orgp { pvBus (v2_organic_amt), pvBus (v2_organic_floor), pb (v2_organic_mono) };
         organicBus.process (xL.data(), xR.data(), n, busVoiceActive, orgp, isBusTick, busSpan);
     }
+
+    masterFilter.process (xL.data(), xR.data(), n, pvBus (v2_out_cut), pvBus (v2_out_res), isBusTick, busSpan);
 
     OutputStage::Params osp { pb (exc_on), pvBus (exc_freq), pvBus (exc_amount), pvBus (exc_harm), pb (clip_on), pvBus (clip_ceiling), pvBus (out_gain) };
     outStage.process (xL.data(), xR.data(), n, osp, isBusTick, busSpan);

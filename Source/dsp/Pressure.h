@@ -343,6 +343,91 @@ private:
 };
 
 //==============================================================================
+/** Master output 64-bit TPT ZDF resonant low-pass filter (post-FX / post-Dust, pre-Clipper).
+    Soft-saturates internal feedback for warm analog resonance and de-harshing; true 0-latency
+    transparent bypass when cutoff >= 19.95 kHz and resonance == 0. */
+class MasterOutputFilter
+{
+public:
+    void prepare (float sampleRate) noexcept
+    {
+        sr = std::max (8000.0, (double) sampleRate);
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        for (int c = 0; c < 2; ++c) { ic1[c] = ic2[c] = 0.0; }
+        cutR.reset(); resR.reset();
+        wasActive = false;
+    }
+
+    void snap (float cutHz, float res) noexcept
+    {
+        reset();
+        cutR.snap (cutHz);
+        resR.snap (res);
+        wasActive = (cutHz < 19950.0f || res > 1.0e-4f);
+    }
+
+    void process (float* l, float* r, int n, float cutHz, float res, bool isCtrlTick = true, int ctrlSpan = 0) noexcept
+    {
+        if (ctrlSpan <= 0) ctrlSpan = n;
+        const bool wantActive = (cutHz < 19950.0f || res > 1.0e-4f);
+        if (! wantActive && ! wasActive)
+        {
+            cutR.snap (20000.0f);
+            resR.snap (0.0f);
+            return;
+        }
+        if (isCtrlTick)
+        {
+            cutR.to (std::clamp (cutHz, 200.0f, 20000.0f), ctrlSpan);
+            resR.to (std::clamp (res, 0.0f, 0.85f), ctrlSpan);
+        }
+        if (! wantActive && cutR.cur >= 19940.0f && resR.cur <= 1.0e-4f)
+        {
+            reset();
+            return;
+        }
+        wasActive = true;
+
+        const double maxFc = 0.44 * sr;
+        for (int i = 0; i < n; ++i)
+        {
+            const double fc = std::min ((double) cutR.next(), maxFc);
+            const double qRes = (double) resR.next();
+            const double g = std::tan (kPiD * fc / sr);
+            const double k = 2.0 - 1.82 * qRes;
+            const double a1 = 1.0 / (1.0 + g * (g + k));
+            const double a2 = g * a1;
+            const double a3 = g * a2;
+
+            float* ch[2] { l + i, r + i };
+            for (int c = 0; c < 2; ++c)
+            {
+                const double x = (double) *ch[c];
+                const double v3 = x - ic2[c];
+                const double v1 = a1 * ic1[c] + a2 * v3;
+                const double v2 = ic2[c] + a2 * ic1[c] + a3 * v3;
+                const double bpSat = (qRes > 0.01) ? fastTanhD (v1 * (1.0 + 0.35 * qRes)) / (1.0 + 0.35 * qRes) : v1;
+                ic1[c] = flushDenormalD (2.0 * bpSat - ic1[c]);
+                ic2[c] = flushDenormalD (2.0 * v2 - ic2[c]);
+                *ch[c] = (float) v2;
+            }
+        }
+    }
+
+private:
+    static constexpr double kPiD = 3.14159265358979323846;
+    static double flushDenormalD (double x) noexcept { return (std::abs (x) < 1.0e-25) ? 0.0 : x; }
+    double sr = 48000.0;
+    double ic1[2] {}, ic2[2] {};
+    Ramp cutR, resR;
+    bool wasActive = false;
+};
+
+//==============================================================================
 /** Output stage, 4x Type-I linear-phase FIR oversampled:
     (24) 64-bit ADAA1 harmonic exciter -> output gain -> (25) 64-bit ADAA2 brickwall clipper -> 16x true-peak ceiling.
     Exact integer linear-phase latency when active (0-sample PDC error) and true 0-latency bypass when both exciter

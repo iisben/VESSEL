@@ -41,6 +41,7 @@ int pidForId (const juce::String& id) noexcept
 
 Stage stageOf (int pid) noexcept
 {
+    if (pid >= v2_out_cut && pid <= v2_out_res) return Stage::Pressure;
     if (pid >= v2_bbd_mode && pid <= v2_bbd_mix) return Stage::Space;
     if (pid >= v2_disp_stages && pid <= v2_disp_pinch) return Stage::Shape;
     if (pid >= v2_rail_sag && pid <= v2_rail_time) return Stage::Voice;
@@ -108,6 +109,10 @@ const std::vector<int>& modDestinations()
                 v.push_back (i);
         // then V2 BBD Analog Chorus parameters (append-only)
         for (int i = v2_bbd_mode; i <= v2_bbd_mix; ++i)
+            if (kSpecs[i].type == PType::Float)
+                v.push_back (i);
+        // then Master output resonant tone filter (append-only)
+        for (int i = v2_out_cut; i <= v2_out_res; ++i)
             if (kSpecs[i].type == PType::Float)
                 v.push_back (i);
         return v;

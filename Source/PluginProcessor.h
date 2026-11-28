@@ -312,6 +312,7 @@ private:
     vessel::dsp::OrganicBus organicBus;
     vessel::dsp::ProceduralTextureBus textureBus;
     vessel::dsp::Svf bodyDc1[2], bodyDc2[2];
+    vessel::dsp::MasterOutputFilter masterFilter;
     vessel::dsp::OutputStage outStage;
     vessel::dsp::DelayLine subAlign;
     vessel::dsp::Smooth convMixS;

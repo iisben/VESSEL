@@ -446,7 +446,10 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (v2_bbd_rate,      "BBD Rate",       Float,  0.05f, 8.0f, 0.55f, 0.8f, 0, Hz, "") \
     F (v2_bbd_depth,     "BBD Depth",      Float,  0, 1, 0.55f,   0, 0, Pct, "") \
     F (v2_bbd_tone,      "BBD Tone",       Float,  6000, 10000, 8000, 8000, 0, Hz, "") \
-    F (v2_bbd_mix,       "BBD Mix",        Float,  0, 1, 0.50f,   0, 0, Pct, "")
+    F (v2_bbd_mix,       "BBD Mix",        Float,  0, 1, 0.50f,   0, 0, Pct, "") \
+    /* Master output resonant tone filter (append-only, 20 kHz / 0% transparent default) */ \
+    F (v2_out_cut,       "Out Cutoff",     Float,  250, 20000, 20000, 3500, 0, Hz, "") \
+    F (v2_out_res,       "Out Resonance",  Float,  0, 0.85f, 0.0f, 0, 0, Pct, "")
 
 enum PID : int
 {
