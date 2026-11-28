@@ -746,7 +746,7 @@ GateResult runGate4()
 
     // Part A: Audio-rate 1 kHz cutoff sweep (20 Hz - 18 kHz) at 95-100% resonance across 4 rates
     bool stabOk = true;
-    double maxSvfPeak = 0.0, maxLadPeak = 0.0;
+    double maxSvfPeak = 0.0, maxLadPeak = 0.0, maxSkPeak = 0.0;
     for (double sr : { 44100.0, 48000.0, 96000.0, 192000.0 })
     {
         const int nSamp = (int) (0.5 * sr);
@@ -758,10 +758,14 @@ GateResult runGate4()
             dsp::Svf svf;
             svf.reset();
             dsp::LadderBank<1> lad;
+            lad.setSampleRate (4.0 * sr);
             lad.resetLane (0);
+            dsp::SallenKeyCore sk;
+            sk.prepare (sr, true);
             const float ladOsr = (float) (4.0 * sr);   // matches voice 4x oversampling
             const float svfQ = 0.707f + resFrac * 25.0f;
             const float ladK = resFrac * 4.3f;
+            const double skK = 2.02 + (double) (resFrac - 0.95f) * 5.2;   // 2.02 .. 2.28 (diode scream)
 
             for (int i = 0; i < nSamp; ++i)
             {
@@ -781,17 +785,23 @@ GateResult runGate4()
                 for (int s = 0; s < 4; ++s) lad.tick (lin, lout);
                 if (! std::isfinite (lout[0]) || std::abs (lout[0]) > 20.0f) stabOk = false;
                 maxLadPeak = std::max (maxLadPeak, (double) std::abs (lout[0]));
+
+                sk.setup ((double) cut, skK, 2.0);
+                const double ysk = sk.process2x ((double) in);
+                if (! std::isfinite (ysk) || std::abs (ysk) > 20.0) stabOk = false;
+                maxSkPeak = std::max (maxSkPeak, std::abs (ysk));
             }
         }
     }
     if (! stabOk) res.status = GateStatus::Fail;
     res.details.push_back ("Audio-rate 1kHz mod (44.1..192k, 95-100% res): svfPk=" + fmt (maxSvfPeak, 2)
-                           + ", ladPk=" + fmt (maxLadPeak, 2) + " [" + (stabOk ? "OK" : "FAIL") + "]");
+                           + ", ladPk=" + fmt (maxLadPeak, 2) + ", skPk=" + fmt (maxSkPeak, 2)
+                           + " [" + (stabOk ? "OK" : "FAIL") + "]");
 
-    // Part B: Static self-oscillation pitch tracking C3-C6 (SVF ±5 ct, 4-pole ladder ±15 ct)
+    // Part B: Static self-oscillation pitch tracking C3-C6 (SVF ±5 ct, 4-pole ladder ±15 ct, Sallen-Key ±15 ct)
     constexpr double sr = 48000.0;
     const int notes[] { 48, 60, 72, 84 };   // C3, C4, C5, C6
-    double maxSvfCents = 0.0, maxLadCents = 0.0;
+    double maxSvfCents = 0.0, maxLadCents = 0.0, maxSkCents = 0.0;
     for (int midi : notes)
     {
         const double targetHz = midiToHzD (midi);
@@ -816,6 +826,7 @@ GateResult runGate4()
             constexpr int os = 4;
             const double osr = sr * (double) os;
             dsp::LadderBank<1> lad;
+            lad.setSampleRate (osr);
             lad.resetLane (0);
             const float g = dsp::LadderBank<1>::coefG ((float) targetHz, (float) osr);
             lad.setLane (0, g, 4.15f, 1.0f, 1, true);
@@ -836,12 +847,27 @@ GateResult runGate4()
             const double cents = std::abs (1200.0 * std::log2 (std::max (measHz, 1.0) / targetHz));
             maxLadCents = std::max (maxLadCents, cents);
         }
+
+        // 12 dB/oct ZDF Sallen-Key Dual-Diode self-oscillation at 2x oversampled rate (96 kHz)
+        {
+            dsp::SallenKeyCore sk;
+            sk.prepare (sr, true);
+            sk.setup (targetHz, 2.08, 1.0);
+            std::vector<float> y ((size_t) total, 0.0f);
+            for (int i = 0; i < total; ++i)
+                y[(size_t) i] = (float) sk.process2x (i == 0 ? 0.1 : 0.0);
+            const double measHz = estimatePitchHz (y, sr, order);
+            const double cents = std::abs (1200.0 * std::log2 (std::max (measHz, 1.0) / targetHz));
+            maxSkCents = std::max (maxSkCents, cents);
+        }
     }
     const bool svfPitchOk = (maxSvfCents <= 5.0);
     const bool ladPitchOk = (maxLadCents <= 15.0);
-    if (! svfPitchOk || ! ladPitchOk) res.status = GateStatus::Fail;
+    const bool skPitchOk  = (maxSkCents  <= 15.0);
+    if (! svfPitchOk || ! ladPitchOk || ! skPitchOk) res.status = GateStatus::Fail;
     res.details.push_back ("Self-osc C3-C6: SVF maxErr=" + fmt (maxSvfCents, 2) + " ct (lim<=5) [" + (svfPitchOk ? "OK" : "FAIL")
-                           + "], Ladder maxErr=" + fmt (maxLadCents, 2) + " ct (lim<=15) [" + (ladPitchOk ? "OK" : "FAIL") + "]");
+                           + "], Ladder maxErr=" + fmt (maxLadCents, 2) + " ct (lim<=15) [" + (ladPitchOk ? "OK" : "FAIL")
+                           + "], SallenKey maxErr=" + fmt (maxSkCents, 2) + " ct (lim<=15) [" + (skPitchOk ? "OK" : "FAIL") + "]");
 
     // Part C: Rate-invariant frequency response (±0.5 dB up to 12 kHz) on 4x-oversampled Ladder & 1x SVF
     const double testFreqs[] { 200.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 12000.0 };
@@ -850,6 +876,7 @@ GateResult runGate4()
     {
         const double osr = 4.0 * rate;
         dsp::LadderBank<1> lad;
+        lad.setSampleRate (osr);
         lad.resetLane (0);
         const float g = dsp::LadderBank<1>::coefG ((float) fc, (float) osr);
         lad.setLane (0, g, 1.2f, 1.0f, 1, true);
@@ -879,8 +906,61 @@ GateResult runGate4()
     res.details.push_back ("Rate-invariant mag (44.1..192k, <=12kHz): Ladder4x maxDiff=" + fmt (maxLadRateDiffDb, 3)
                            + " dB (lim<=0.5) [" + (rateOk ? "OK" : "FAIL") + "]");
 
+    // Part D: Driven Nonlinear Filter Aliasing (< -75 dBc @ C6 & 6 kHz) & DC Hygiene (< -90 dBFS)
+    double worstFltAlias = -300.0, worstFltDc = -300.0;
+    {
+        const int totalA = (int) (1.6 * sr);
+        // 1) Driven 4-Pole Coupled Transistor Ladder at C6 (1046.5 Hz) saw & ~6 kHz sine via VesselProcessor
+        for (int testKind = 0; testKind < 2; ++testKind)
+        {
+            auto p = makeProcessor (sr, 512);
+            setCleanDryPatch (*p);
+            setP (*p, wt_level, 0.55f);   // calibrated preset nominal oscillator level
+            setP (*p, wt_morph, testKind == 0 ? (2.0f / 7.0f) : 0.0f);   // saw @ C6 or sine @ ~6 kHz (MIDI 114 = 5919.9 Hz)
+            setP (*p, flt_on, 1.0f);
+            setP (*p, flt_route, 2.0f);
+            setP (*p, flt_a_cut, testKind == 0 ? 6000.0f : 12000.0f);
+            setP (*p, flt_a_res, 0.50f);
+            setP (*p, flt_drive, testKind == 0 ? 0.60f : 0.55f);
+            setP (*p, flt_env, 0.0f);
+            setP (*p, flt_key, 0.0f);
+            p->prepareToPlay (sr, 512);
+            const int midi = testKind == 0 ? 84 : 114;
+            auto r = renderEvents (*p, sr, totalA, { 512 }, { { 0, juce::MidiMessage::noteOn (1, midi, 1.0f) } });
+            const auto am = measureHarmonicAliasing (r.l, sr, midiToHzD (midi));
+            worstFltAlias = std::max (worstFltAlias, am.aliasedDbc);
+            worstFltDc = std::max (worstFltDc, am.dcDbfs);
+            if (r.nonFiniteCount > 0) stabOk = false;
+        }
+        // 2) Driven 12 dB/oct ZDF Sallen-Key Dual-Diode Core at C6 (1046.5 Hz) & 6000 Hz (2x OS + DcBlocker)
+        for (double f0 : { midiToHzD (84), 6000.0 })
+        {
+            dsp::SallenKeyCore sk;
+            dsp::DcBlocker dc;
+            sk.prepare (sr, true);
+            dc.prepare (sr, 5.0);
+            sk.setup (std::min (14000.0, f0 * 1.45), 1.92, 1.8);
+            std::vector<float> y ((size_t) totalA, 0.0f);
+            for (int i = 0; i < totalA; ++i)
+            {
+                const double x = 0.65 * std::sin (kTwoPiD * f0 * (double) i / sr);
+                y[(size_t) i] = (float) dc.process (sk.process2x (x));
+                if (! std::isfinite (y[(size_t) i])) stabOk = false;
+            }
+            const auto am = measureHarmonicAliasing (y, sr, f0);
+            worstFltAlias = std::max (worstFltAlias, am.aliasedDbc);
+            worstFltDc = std::max (worstFltDc, am.dcDbfs);
+        }
+    }
+    const bool fltAliasOk = (worstFltAlias < -75.0) && (worstFltDc < -90.0) && stabOk;
+    if (! fltAliasOk) res.status = GateStatus::Fail;
+    res.details.push_back ("Driven Nonlinear Filters (C6 & 6kHz): alias=" + fmt (worstFltAlias, 1)
+                           + " dBc (lim<-75), DC=" + fmt (worstFltDc, 1) + " dBFS (lim<-90) [" + (fltAliasOk ? "OK" : "FAIL") + "]");
+
     res.summary = "modStab=" + std::string (stabOk ? "OK" : "FAIL")
-                + ", SVF=" + fmt (maxSvfCents, 2) + "ct, Lad=" + fmt (maxLadCents, 2) + "ct, rateDiff=" + fmt (maxLadRateDiffDb, 3) + "dB";
+                + ", SVF=" + fmt (maxSvfCents, 2) + "ct, Lad=" + fmt (maxLadCents, 2)
+                + "ct, SK=" + fmt (maxSkCents, 2) + "ct, rateDiff=" + fmt (maxLadRateDiffDb, 3)
+                + "dB, nlAlias=" + fmt (worstFltAlias, 1) + "dBc, DC=" + fmt (worstFltDc, 1) + "dBFS";
     return res;
 }
 

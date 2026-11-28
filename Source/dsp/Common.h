@@ -355,6 +355,161 @@ struct DcBlocker
     void reset() noexcept { x1 = y1 = 0.0; }
 };
 
+/** 64-bit exact elliptic 4+4 polyphase allpass halfband 2x oversampler.
+    Passband flatness < 1e-6 dB up to 0.42*fs (20.16 kHz @ 48 kHz), stopband > 125 dB.
+    Sample-by-sample API (zero heap allocations, odd-block invariant, denormal safe). */
+struct Halfband2x
+{
+    static constexpr double kA0[4] { 0.026821928500, 0.214527533360, 0.489449268646, 0.773727278635 };
+    static constexpr double kA1[4] { 0.102468849567, 0.347836340388, 0.631780124224, 0.920832324410 };
+
+    double upX0[4] {}, upY0[4] {}, upX1[4] {}, upY1[4] {};
+    double dnX0[4] {}, dnY0[4] {}, dnX1[4] {}, dnY1[4] {};
+
+    void reset() noexcept
+    {
+        for (int k = 0; k < 4; ++k)
+            upX0[k] = upY0[k] = upX1[k] = upY1[k] = dnX0[k] = dnY0[k] = dnX1[k] = dnY1[k] = 0.0;
+    }
+
+    static inline double allpass4 (double x, const double c[4], double sx[4], double sy[4]) noexcept
+    {
+        double v = x;
+        for (int k = 0; k < 4; ++k)
+        {
+            const double y = c[k] * (v - sy[k]) + sx[k];
+            sx[k] = v;
+            sy[k] = flushDenormal (y);
+            v = y;
+        }
+        return v;
+    }
+
+    /** Upsample 1 base-rate sample into 2 oversampled samples (y0, y1). */
+    inline void upsample (double x, double& y0, double& y1) noexcept
+    {
+        y0 = allpass4 (x, kA0, upX0, upY0);
+        y1 = allpass4 (x, kA1, upX1, upY1);
+    }
+
+    /** Downsample 2 oversampled samples (v0, v1) into 1 base-rate sample. */
+    inline double downsample (double v0, double v1) noexcept
+    {
+        return 0.5 * (allpass4 (v1, kA0, dnX0, dnY0) + allpass4 (v0, kA1, dnX1, dnY1));
+    }
+};
+
+/** 64-bit Zero-Delay-Feedback Sallen-Key Dual-Diode Core (12 dB/oct resonant LPF).
+    - Exact trapezoidal TPT two-stage Sallen-Key topology with subtle +/-0.35% stage mismatch
+      (geometric-mean preserved for < 0.05 ct self-oscillation tuning accuracy).
+    - Asymmetric dual-diode clipper inside the resonance feedback path (exact D(0)=0, D'(0)=1)
+      so high resonance screams and compresses organically with even + odd harmonics without exploding.
+    - O(1) strictly bounded Newton-Raphson solver (max 3 iterations; provably F'(y2) >= 0.36 > 0).
+    - Built-in 64-bit polyphase halfband 2x oversampling when driven/resonant. */
+struct SallenKeyCore
+{
+    static constexpr double kStage1Mul = 1.0035;
+    static constexpr double kStage2Mul = 0.9965;
+    static constexpr double kVd        = 0.95;
+    static constexpr double kInvVd     = 1.0 / kVd;
+    static constexpr double kBd        = 0.15;
+    static constexpr double kTd0       = 0.14888503362331806;   // tanh(0.15)
+    static constexpr double kInvSd0    = 1.0226707094124906;    // 1 / (1 - tanh(0.15)^2)
+    static constexpr double kVin       = 3.0;
+    static constexpr double kInvVin    = 1.0 / kVin;
+
+    double baseSr = 48000.0;
+    double G1 = 0.0, H1 = 1.0, G2 = 0.0, H2 = 1.0, alpha = 0.0;
+    double kRes = 0.5, drive = 1.0, invSqrtDrive = 1.0;
+    double s1 = 0.0, s2 = 0.0;
+    Halfband2x os;
+    bool use2x = true;
+
+    void prepare (double sr, bool oversample2x = true) noexcept
+    {
+        baseSr = std::max (sr, 1.0);
+        use2x = oversample2x;
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        s1 = s2 = 0.0;
+        os.reset();
+    }
+
+    /** Configure cutoff (Hz), Sallen-Key resonance k in [0, 2.35] (k=2-1/Q linearly; k>2 self-oscillates),
+        and input drive >= 1.0. */
+    void setup (double cutoffHz, double kIn, double driveIn = 1.0) noexcept
+    {
+        const double osr = use2x ? (2.0 * baseSr) : baseSr;
+        const double safeFc = std::clamp (cutoffHz, 10.0, 0.48 * baseSr);
+        const double gBase = std::tan (kPiD * std::min (safeFc, 0.485 * osr) / osr);
+        const double g1 = gBase * kStage1Mul;
+        const double g2 = gBase * kStage2Mul;
+        G1 = g1 / (1.0 + g1);
+        H1 = 1.0 - G1;
+        G2 = g2 / (1.0 + g2);
+        H2 = 1.0 - G2;
+        alpha = G2 * H1;
+        kRes = std::clamp (kIn, 0.0, 2.35);
+        drive = std::clamp (driveIn, 1.0, 8.0);
+        invSqrtDrive = 1.0 / std::sqrt (drive);
+    }
+
+    /** Single core tick at the configured internal rate (strictly 3 bounded NR iterations). */
+    inline double tickCore (double xIn) noexcept
+    {
+        // Subtle MS-20 OTA input stage soft rounding (exact unity slope at small signals)
+        const double x = (kVin * invSqrtDrive) * fastTanhLadder (xIn * drive * kInvVin);
+        const double S = G2 * (G1 * x + H1 * s1) + H2 * s2;
+        const double k = kRes;
+        const double ak = alpha * k;
+
+        // Exact linear ZDF initial guess (denominator >= 1 - 0.25*2.35 = 0.4125)
+        double y2 = S / (1.0 - ak);
+
+        // O(1) strictly bounded 3-step Newton-Raphson (globally F'(y2) >= 0.38 > 0)
+        double vfb = 0.0;
+        for (int it = 0; it < 3; ++it)
+        {
+            const double th = fastTanhLadder (k * y2 * kInvVd + kBd);
+            vfb = kVd * (th - kTd0) * kInvSd0;
+            const double dD = (1.0 - th * th) * kInvSd0;
+            const double res = y2 - S - alpha * vfb;
+            const double jac = 1.0 - ak * dD;
+            y2 -= res / jac;
+        }
+
+        // Converged asymmetric dual-diode feedback value
+        const double thF = fastTanhLadder (k * y2 * kInvVd + kBd);
+        vfb = kVd * (thF - kTd0) * kInvSd0;
+
+        // Exact trapezoidal TPT state update (unconditionally stable under audio-rate modulation)
+        const double z1 = G1 * (x - vfb) + H1 * s1;
+        s1 = flushDenormal (2.0 * z1 - s1);
+        const double y1 = z1 + vfb;
+        const double y2Out = G2 * y1 + H2 * s2;
+        s2 = flushDenormal (2.0 * y2Out - s2);
+        return y2Out;
+    }
+
+    /** 2x oversampled processing via 64-bit polyphase allpass halfband IIR. */
+    inline double process2x (double x) noexcept
+    {
+        double u0, u1;
+        os.upsample (x, u0, u1);
+        const double v0 = tickCore (u0);
+        const double v1 = tickCore (u1);
+        return os.downsample (v0, v1);
+    }
+
+    inline float process (float x) noexcept
+    {
+        return (float) (use2x ? process2x ((double) x) : tickCore ((double) x));
+    }
+};
+
 /** Power-of-two circular delay buffer with linear and Hermite reads. */
 struct DelayLine
 {

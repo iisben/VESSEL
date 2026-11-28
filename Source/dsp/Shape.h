@@ -5,7 +5,9 @@
 namespace vessel::dsp
 {
 //==============================================================================
-/** (12) Envelope-follower lowpass: the programme's own amplitude opens (or, with negative depth, closes) a resonant LPF. */
+/** (12) Envelope-follower lowpass: 64-bit ZDF Sallen-Key Dual-Diode Core (12 dB/oct, 2x oversampled).
+    The programme's own amplitude opens (or, with negative depth, closes) the resonant LPF;
+    high resonance pushes into asymmetric dual-diode clipping and organic self-oscillation. */
 class FollowerFilter
 {
 public:
@@ -15,8 +17,12 @@ public:
     {
         sr = sampleRate;
         env.reset(); envN = 0.0f; sampleCount = 0;
-        f[0].reset(); f[1].reset();
-        cutR.reset(); depthR.reset(); qR.reset(); mixR.reset();
+        for (int c = 0; c < 2; ++c)
+        {
+            f[c].prepare ((double) sampleRate, true);
+            dc[c].prepare ((double) sampleRate, 5.0);
+        }
+        cutR.reset(); depthR.reset(); resR.reset(); mixR.reset();
     }
     float lastEnv() const noexcept { return envN; }
 
@@ -28,20 +34,29 @@ public:
         {
             env.setTimes (p.attackMs, p.releaseMs, sr);
             cutR.to (fastLog2 (std::max (20.0f, p.cutoff)), ctrlSpan); depthR.to (p.depth, ctrlSpan);
-            qR.to (0.6f + p.res * 9.0f, ctrlSpan); mixR.to (p.mix, ctrlSpan);
+            resR.to (clamp01 (p.res), ctrlSpan); mixR.to (p.mix, ctrlSpan);
         }
 
         for (int i = 0; i < n; ++i)
         {
-            const float lc = cutR.next(), dp = depthR.next(), q = qR.next(), mix = mixR.next();
+            const float lc = cutR.next(), dp = depthR.next(), rv = resR.next(), mix = mixR.next();
             envN = std::min (1.0f, env.process (0.5f * (l[i] + r[i])) * 3.0f);
             if ((sampleCount++ & 7u) == 0u)
             {
-                const float fc = fastExp2 (lc + dp * 7.0f * envN);
-                f[0].setup (fc, q, sr); f[1].setup (fc, q, sr);
+                const double fc = (double) fastExp2 (lc + dp * 7.0f * envN);
+                // Calibrated to match linear SVF Q = 0.6 + 9*res for existing presets (res <= 0.35),
+                // smoothly pushing above k = 2.0 into asymmetric dual-diode scream at high resonance.
+                const double rd = (double) rv;
+                const double r2 = rd * rd;
+                const double kRes = std::min (2.28, (2.0 - 1.0 / (0.6 + 9.0 * rd)) + 0.38 * r2 * r2);
+                const double drv = 1.0 + 0.65 * r2;
+                f[0].setup (fc, kRes, drv);
+                f[1].setup (fc, kRes, drv);
             }
-            l[i] += mix * (f[0].lowpass (l[i]) - l[i]);
-            r[i] += mix * (f[1].lowpass (r[i]) - r[i]);
+            const float yl = (float) dc[0].process (f[0].process2x ((double) l[i]));
+            const float yr = (float) dc[1].process (f[1].process2x ((double) r[i]));
+            l[i] += mix * (yl - l[i]);
+            r[i] += mix * (yr - r[i]);
         }
     }
 
@@ -49,8 +64,9 @@ private:
     float sr = 48000.0f, envN = 0.0f;
     uint64_t sampleCount = 0;
     EnvFollower env;
-    Svf f[2];
-    Ramp cutR, depthR, qR, mixR;
+    SallenKeyCore f[2];
+    DcBlocker dc[2];
+    Ramp cutR, depthR, resR, mixR;
 };
 
 //==============================================================================

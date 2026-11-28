@@ -172,15 +172,75 @@ private:
 };
 
 //==============================================================================
-/** Lane-parallel bank of 64-bit double 24 dB/oct nonlinear zero-delay-feedback
-   transistor ladders. Structure-of-arrays: every operation is identical across
-   lanes with zero data-dependent branches, enabling portable NEON / SSE2 / AVX2
-   auto-vectorization. processSoA() register-tiles 4 lanes across the entire
-   sub-block and skips idle 4-lane groups. */
+/** Lane-parallel bank of 64-bit double coupled 4-pole nonlinear ZDF transistor
+   ladders (24 dB/oct, running at 4x voice oversampling):
+    - Deterministic per-stage +/-0.5% cutoff & gain component mismatch
+   (zero-mean sum / unity product per lane to preserve pitch tracking and gain
+   staging).
+    - Asymmetric differential pair clipping at input + coupled mid-ladder BJT
+      stage (exact phi(0)=0, phi'(0)=1 -> subtle even + odd harmonics).
+    - Shared I_BIAS current-starvation sag (bass-weighted + broadband energy
+      smoothly compresses cutoff and resonance under heavy drive/bass).
+    - O(1) strictly bounded ZDF Newton-Raphson solver (max 3 iterations;
+      provably F'(y3) >= 1.0 everywhere). Structure-of-arrays for portable
+      NEON / SSE2 / AVX2 auto-vectorization. */
 template <int L> struct LadderBank {
+  // Asymmetric input differential pair constants (bIn = +0.075, phi(0)=0,
+  // phi'(0)=1)
+  static constexpr double kBIn = 0.075;
+  static constexpr double kTIn0 = 0.07485965928379538;   // tanh(0.075)
+  static constexpr double kInvSIn0 = 1.0056355427585296; // 1 / (1 - kTIn0^2)
+  static constexpr double kPhiMin = (-1.0 - kTIn0) * kInvSIn0;
+  static constexpr double kPhiMax = (1.0 - kTIn0) * kInvSIn0;
+
+  // Coupled mid-ladder BJT pair constants (C2 cubic Hermite, zero-division,
+  // zero >3rd-harmonic aliasing; betaM = 0.30, bM = -0.05, exact psi(0)=0,
+  // psi'(0)=1, globally monotonic psi'(y) >= 0)
+  static constexpr double kBetaM = 0.30;
+  static constexpr double kInvBetaM = 1.0 / kBetaM;
+  static constexpr double kBM = -0.05;
+  static constexpr double kCubicC = 4.0 / 27.0;
+  static constexpr double kDerivC = 4.0 / 9.0;
+  static constexpr double kHM0 = kBM - kCubicC * kBM * kBM * kBM;
+  static constexpr double kInvDHM0 = 1.0 / (1.0 - kDerivC * kBM * kBM);
+  static constexpr double kInvBetaDHM0 = kInvBetaM * kInvDHM0;
+  static constexpr double kPsiMin = kInvBetaM * (-1.0 - kHM0) * kInvDHM0;
+  static constexpr double kPsiMax = kInvBetaM * (1.0 - kHM0) * kInvDHM0;
+
+  // Per-stage +/-0.5% component tolerances (exact zero-sum cutoff, exact
+  // zero-sum gain -> unity product)
+  static constexpr double kDg0 = 0.0046, kDg1 = -0.0038, kDg2 = 0.0028,
+                          kDg3 = -0.0036;
+  static constexpr double kDa0 = 0.0038, kDa1 = -0.0042, kDa2 = 0.0040,
+                          kDa3 = -0.0036;
+
   alignas(32) double s0[L]{}, s1[L]{}, s2[L]{}, s3[L]{};
+  alignas(32) double sBass[L]{}, sBias[L]{}, drvSag[L]{};
   alignas(32) double G[L]{}, dG[L]{}, k[L]{}, dk[L]{}, drv[L]{}, ddrv[L]{},
       isd[L]{}, disd[L]{};
+  alignas(32) double tol[L]{};
+  double cBassEnv = 0.005873205660390293; // 1 - exp(-2*pi*180 / 192000)
+  double cSag = 0.0002083116375176354;    // 1 - exp(-1 / (0.025 * 192000))
+
+  LadderBank() noexcept {
+    // Deterministic per-lane component tolerance scale in [-1, +1] (never zero)
+    for (int l = 0; l < L; ++l) {
+      uint32_t h = (uint32_t)(l + 1) * 2654435761u ^ 0xA3C59AC3u;
+      h ^= h << 13;
+      h ^= h >> 17;
+      h ^= h << 5;
+      const double u = (double)(h >> 8) * (1.0 / 16777216.0); // [0, 1)
+      const double mag = 0.55 + 0.45 * u;
+      tol[l] = (l & 1) ? -mag : mag;
+      drvSag[l] = 1.0;
+    }
+  }
+
+  void setSampleRate(double osr) noexcept {
+    const double safeOsr = std::max(osr, 1.0);
+    cBassEnv = 1.0 - std::exp(-kTwoPiD * 180.0 / safeOsr);
+    cSag = 1.0 - std::exp(-1.0 / (0.025 * safeOsr));
+  }
 
   static double coefGD(double hz, double osr) noexcept {
     const double safeOsr = std::max(osr, 1.0);
@@ -193,12 +253,28 @@ template <int L> struct LadderBank {
     return (float)coefGD((double)hz, (double)osr);
   }
 
-  void resetLane(int l) noexcept { s0[l] = s1[l] = s2[l] = s3[l] = 0.0; }
+  void resetLane(int l) noexcept {
+    s0[l] = s1[l] = s2[l] = s3[l] = 0.0;
+    sBass[l] = sBias[l] = 0.0;
+  }
+
+  /** Apply shared I_BIAS current-starvation sag from lane's energy state (called
+   * on fixed control ticks). */
+  inline void applyBiasSag(int l, double &Gt, double &kt) const noexcept {
+    const double uSag = sBias[l] < 3.6 ? (sBias[l] * (1.0 / 3.6)) : 1.0;
+    const double omU = 1.0 - uSag;
+    const double sag = 0.85 * (1.0 - omU * omU * omU);
+    Gt *= (1.0 - 0.12 * sag);
+    kt *= (1.0 - 0.08 * sag);
+  }
 
   void setLane(int l, double Gt, double kt, double driveT, int m,
                bool snap) noexcept {
     const double isdT = 1.0 / std::sqrt(std::max(driveT, 1.0e-6));
-    if (snap) {
+    drvSag[l] = 0.5 + 0.5 * driveT * isdT;
+    if (snap || (std::abs(Gt - G[l]) <= 0.0006 * std::max(G[l], 1.0e-5) &&
+                 std::abs(kt - k[l]) <= 0.002 &&
+                 std::abs(driveT - drv[l]) <= 1.0e-5)) {
       G[l] = Gt;
       k[l] = kt;
       drv[l] = driveT;
@@ -214,70 +290,138 @@ template <int L> struct LadderBank {
   }
   void holdLane(int l) noexcept { dG[l] = dk[l] = ddrv[l] = disd[l] = 0.0; }
 
-  /** Single-sample tick across all L lanes (used by standalone QA / 1-lane
-   * verification). */
+  /** Single-sample tick across all L lanes (O(1) bounded 3-step NR solver). */
   inline void tick(const float *__restrict in, float *__restrict out) noexcept {
     for (int l = 0; l < L; ++l) {
       const double g = (G[l] += dG[l]);
       const double kk = (k[l] += dk[l]);
       const double d = (drv[l] += ddrv[l]);
       const double id = (isd[l] += disd[l]);
+      const double did = d * id;
+      const double xin = (double)in[l];
+      const double tl = tol[l];
 
-      const double g2 = g * g, g3 = g2 * g, g4 = g3 * g;
-      const double oneMinusG = 1.0 - g;
-      const double S =
-          (g3 * s0[l] + g2 * s1[l] + g * s2[l] + s3[l]) * oneMinusG;
-      const double x = (double)in[l] * (1.0 + 0.55 * kk);
+      // Shared I_BIAS current-starvation sag (zero-division C2 saturator)
+      sBass[l] += cBassEnv * (xin - sBass[l]);
+      const double eInst =
+          (1.4 * sBass[l] * sBass[l] + 0.35 * xin * xin) * (0.5 + 0.5 * did);
+      sBias[l] += cSag * (eInst - sBias[l]);
+      const double uSag = sBias[l] < 3.6 ? (sBias[l] * (1.0 / 3.6)) : 1.0;
+      const double omU = 1.0 - uSag;
+      const double sag = 0.85 * (1.0 - omU * omU * omU);
 
-      const double g4id = g4 * id;
-      const double g4idk = g4id * d * kk;
-      double y4 = (g4 * (d * id) * x + S) / (1.0 + g4idk);
+      const double gEff = g * (1.0 - 0.12 * sag);
+      const double kEff = kk * (1.0 - 0.08 * sag);
+      const double gStep = gEff * (1.0 - gEff) * tl;
+      const double g0 = gEff + gStep * kDg0;
+      const double g1 = gEff + gStep * kDg1;
+      const double g2 = gEff + gStep * kDg2;
+      const double g3 = gEff + gStep * kDg3;
 
-      double th = fastTanhLadder(d * (x - kk * y4));
-      double sech2 = 1.0 - th * th;
-      double step = (y4 - S - g4id * th) / (1.0 + g4idk * sech2);
-      y4 -= step;
+      const double a0 = 1.0 + kDa0 * tl, a1 = 1.0 + kDa1 * tl;
+      const double a2 = 1.0 + kDa2 * tl, a3 = 1.0 + kDa3 * tl;
+      const double p0 = a0 * g0, p1 = a1 * g1, p2 = a2 * g2, p3 = a3 * g3;
 
-      th = fastTanhLadder(d * (x - kk * y4));
-      sech2 = 1.0 - th * th;
-      step = (y4 - S - g4id * th) / (1.0 + g4idk * sech2);
-      y4 -= step;
+      const double G01 = p1 * p0;
+      const double S01 = p1 * (1.0 - g0) * s0[l] + (1.0 - g1) * s1[l];
+      const double G23 = p3 * p2;
+      const double S23 = p3 * (1.0 - g2) * s2[l] + (1.0 - g3) * s3[l];
+      const double G4 = G23 * G01;
 
-      const double u = id * std::clamp(th + sech2 * (d * kk * step), -1.0, 1.0);
+      const double x = xin * (1.0 + 0.55 * kEff);
+      const double G4did = G4 * did;
+      const double G4idk = G4did * kEff;
+      double y3 = (G4did * x + G23 * S01 + S23) / (1.0 + G4idk);
 
-      double v = (u - s0[l]) * g;
-      double y = v + s0[l];
-      s0[l] = y + v;
-      double st = y;
-      v = (st - s1[l]) * g;
-      y = v + s1[l];
-      s1[l] = y + v;
-      st = y;
-      v = (st - s2[l]) * g;
-      y = v + s2[l];
-      s2[l] = y + v;
-      st = y;
-      v = (st - s3[l]) * g;
-      y = v + s3[l];
-      s3[l] = y + v;
-      out[l] = (float)y;
+      // O(1) strictly bounded 3-step Newton-Raphson (F'(y3) >= 1.0 everywhere)
+      for (int it = 0; it < 3; ++it) {
+        const double thIn = fastTanhLadder(d * (x - kEff * y3) + kBIn);
+        const double phi = (thIn - kTIn0) * kInvSIn0;
+        const double dphi = (1.0 - thIn * thIn) * kInvSIn0;
+        const double y1Try = G01 * (id * phi) + S01;
+        const double wm = std::clamp(kBetaM * y1Try + kBM, -1.5, 1.5);
+        const double wm2 = wm * wm;
+        const double m1Try = (wm * (1.0 - kCubicC * wm2) - kHM0) * kInvBetaDHM0;
+        const double dpsi = (1.0 - kDerivC * wm2) * kInvDHM0;
+        const double res = y3 - (G23 * m1Try + S23);
+        const double jac = 1.0 + G4idk * dpsi * dphi;
+        y3 -= res / jac;
+      }
+
+      const double thF = fastTanhLadder(d * (x - kEff * y3) + kBIn);
+      const double u = id * (thF - kTIn0) * kInvSIn0;
+
+      const double y0 = (a0 * u - s0[l]) * g0 + s0[l];
+      s0[l] = flushDenormal(2.0 * y0 - s0[l]);
+
+      const double y1 = (a1 * y0 - s1[l]) * g1 + s1[l];
+      s1[l] = flushDenormal(2.0 * y1 - s1[l]);
+
+      const double wmF = std::clamp(kBetaM * y1 + kBM, -1.5, 1.5);
+      const double m1 =
+          (wmF * (1.0 - kCubicC * wmF * wmF) - kHM0) * kInvBetaDHM0;
+
+      const double y2 = (a2 * m1 - s2[l]) * g2 + s2[l];
+      s2[l] = flushDenormal(2.0 * y2 - s2[l]);
+
+      const double y3Out = (a3 * y2 - s3[l]) * g3 + s3[l];
+      s3[l] = flushDenormal(2.0 * y3Out - s3[l]);
+
+      sBass[l] = flushDenormal(sBass[l]);
+      sBias[l] = flushDenormal(sBias[l]);
+      out[l] = (float)y3Out;
     }
   }
 
-  /** Portable SoA SIMD block processing across 8-lane groups (4 independent NEON/SSE2 double chains
-   * interleave across the TPT feedback latency, saturating all FP execution pipes with zero spills). */
+  /** Portable SoA SIMD block processing across 8-lane groups (4 independent
+   * NEON/SSE2 double chains interleave across the TPT feedback latency,
+   * saturating all FP execution pipes with zero spills). */
   template <int Stride>
   void processSoA(const float (&inBuf)[L][Stride], float (&outBuf)[L][Stride],
                   int m, uint32_t activeMask) noexcept {
     static_assert(L % 8 == 0,
                   "LadderBank::processSoA requires L to be a multiple of 8");
+    const double cB = cBassEnv;
+    const double cS = cSag;
+
     for (int base = 0; base < L; base += 8) {
       if (((activeMask >> base) & 0xFFu) == 0u)
         continue;
 
+      // Isolated per-sample I_BIAS energy tracker (0 vector register pressure
+      // in main ZDF loop, 100% odd-block invariant).
+      {
+        alignas(32) double lb[8], le[8], lds[8];
+        for (int j = 0; j < 8; ++j) {
+          const int l = base + j;
+          lb[j] = sBass[l];
+          le[j] = sBias[l];
+          lds[j] = drvSag[l];
+        }
+        for (int i = 0; i < m; ++i) {
+          alignas(32) double x8[8];
+          for (int j = 0; j < 8; ++j)
+            x8[j] = (double)inBuf[base + j][i];
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+          for (int j = 0; j < 8; ++j) {
+            const double xr = x8[j];
+            lb[j] += cB * (xr - lb[j]);
+            le[j] +=
+                cS * ((1.4 * lb[j] * lb[j] + 0.35 * xr * xr) * lds[j] - le[j]);
+          }
+        }
+        for (int j = 0; j < 8; ++j) {
+          const int l = base + j;
+          sBass[l] = flushDenormal(lb[j]);
+          sBias[l] = flushDenormal(le[j]);
+        }
+      }
+
       alignas(32) double ls0[8], ls1[8], ls2[8], ls3[8];
       alignas(32) double lG[8], ldG[8], lk[8], ldk[8], ld[8], ldd[8], lid[8],
-          ldid[8];
+          ldid[8], lTol[8];
       double maxG = 0.0;
       double maxDelta = 0.0;
       for (int j = 0; j < 8; ++j) {
@@ -294,6 +438,7 @@ template <int L> struct LadderBank {
         ldd[j] = ddrv[l];
         lid[j] = isd[l];
         ldid[j] = disd[l];
+        lTol[j] = tol[l];
         maxG = std::max({maxG, lG[j], lG[j] + ldG[j] * (double)m});
         maxDelta = std::max({maxDelta, std::abs(ldG[j]), std::abs(ldk[j]),
                              std::abs(ldd[j]), std::abs(ldid[j])});
@@ -303,26 +448,49 @@ template <int L> struct LadderBank {
       const bool coeffsConst = (maxDelta == 0.0);
 
       if (useFastInv && coeffsConst) {
-        // Steady-state fast path: hoist all filter coefficients outside the m-sample loop (zero ramp math per sample!)
-        alignas(32) double cg[8], cg2[8], cg3[8], cOmG[8], cBass[8], cG4id[8],
-            cG4idk[8], cG4did[8], cInvPiv[8], cD[8], cK[8], cId[8], cDK[8];
+        // Steady-state hoisted fast path: all mismatched stage coeffs hoisted
+        // outside sample loop, 1 division total per sample (thIn), zero spills.
+        alignas(32) double cg0[8], cg1[8], cg2[8], cg3[8];
+        alignas(32) double cA1[8], cA2[8], cA3[8], cIdA0[8];
+        alignas(32) double cS0[8], cS1[8], cS2[8], cS3[8];
+        alignas(32) double cG01[8], cG23[8], cG4did[8], cG4idk[8], cInvPiv[8];
+        alignas(32) double cBass[8], cD[8], cK[8], cDK[8];
         for (int j = 0; j < 8; ++j) {
-          const double g = lG[j], kk = lk[j], d = ld[j], id = lid[j];
-          const double g2 = g * g, g3 = g2 * g, g4 = g3 * g;
-          const double g4id = g4 * id;
-          const double g4idk = g4id * d * kk;
-          cg[j] = g;
+          const double g = lG[j], kk = lk[j], d = ld[j], id = lid[j],
+                       tl = lTol[j];
+          const double gStep = g * (1.0 - g) * tl;
+          const double g0 = g + gStep * kDg0;
+          const double g1 = g + gStep * kDg1;
+          const double g2 = g + gStep * kDg2;
+          const double g3 = g + gStep * kDg3;
+          const double a0 = 1.0 + kDa0 * tl;
+          const double a1 = 1.0 + kDa1 * tl;
+          const double a2 = 1.0 + kDa2 * tl;
+          const double a3 = 1.0 + kDa3 * tl;
+          const double p0 = a0 * g0, p1 = a1 * g1, p2 = a2 * g2, p3 = a3 * g3;
+          const double G01 = p1 * p0, G23 = p3 * p2, G4 = G23 * G01;
+          const double G4did = G4 * (d * id);
+          const double G4idk = G4did * kk;
+          cg0[j] = g0;
+          cg1[j] = g1;
           cg2[j] = g2;
           cg3[j] = g3;
-          cOmG[j] = 1.0 - g;
+          cA1[j] = a1;
+          cA2[j] = a2;
+          cA3[j] = a3;
+          cIdA0[j] = id * a0;
+          cS0[j] = p1 * (1.0 - g0);
+          cS1[j] = 1.0 - g1;
+          cS2[j] = p3 * (1.0 - g2);
+          cS3[j] = 1.0 - g3;
+          cG01[j] = G01 * id;
+          cG23[j] = G23;
+          cG4did[j] = G4did;
+          cG4idk[j] = G4idk;
+          cInvPiv[j] = 1.0 - G4idk * (1.0 - G4idk * (1.0 - G4idk));
           cBass[j] = 1.0 + 0.55 * kk;
-          cG4id[j] = g4id;
-          cG4idk[j] = g4idk;
-          cG4did[j] = g4 * (d * id);
-          cInvPiv[j] = 1.0 - g4idk * (1.0 - g4idk * (1.0 - g4idk));
           cD[j] = d;
           cK[j] = kk;
-          cId[j] = id;
           cDK[j] = d * kk;
         }
 
@@ -336,53 +504,77 @@ template <int L> struct LadderBank {
 #pragma clang loop vectorize(enable)
 #endif
           for (int j = 0; j < 8; ++j) {
-            const double g = cg[j];
-            const double S =
-                (cg3[j] * ls0[j] + cg2[j] * ls1[j] + g * ls2[j] + ls3[j]) *
-                cOmG[j];
+            const double S01 = cS0[j] * ls0[j] + cS1[j] * ls1[j];
+            const double S23 = cS2[j] * ls2[j] + cS3[j] * ls3[j];
             const double x = xin[j] * cBass[j];
-            const double y4 = (cG4did[j] * x + S) * cInvPiv[j];
+            const double y3 =
+                (cG4did[j] * x + cG23[j] * S01 + S23) * cInvPiv[j];
 
-            const double arg = cD[j] * (x - cK[j] * y4);
-            const double ac = arg < -6.0 ? -6.0 : (arg > 6.0 ? 6.0 : arg);
+            const double wIn = cD[j] * (x - cK[j] * y3) + kBIn;
+            const double ac = wIn < -6.0 ? -6.0 : (wIn > 6.0 ? 6.0 : wIn);
             const double a2 = ac * ac;
-            const double th =
-                (ac * (34459425.0 +
-                       a2 * (4729725.0 +
-                             a2 * (135135.0 + a2 * (990.0 + a2))))) /
+            const double thIn =
+                (ac *
+                 (34459425.0 +
+                  a2 * (4729725.0 + a2 * (135135.0 + a2 * (990.0 + a2))))) /
                 (34459425.0 +
                  a2 * (16216200.0 +
                        a2 * (945945.0 + a2 * (13860.0 + 45.0 * a2))));
-            const double sech2 = 1.0 - th * th;
-            const double uNr = cG4idk[j] * sech2;
-            const double invNr = 1.0 - uNr * (1.0 - uNr * (1.0 - uNr));
-            const double step = (y4 - S - cG4id[j] * th) * invNr;
-            const double rawU = th + sech2 * (cDK[j] * step);
-            const double u =
-                cId[j] * (rawU < -1.0 ? -1.0 : (rawU > 1.0 ? 1.0 : rawU));
+            const double phi = (thIn - kTIn0) * kInvSIn0;
+            const double dphi = (1.0 - thIn * thIn) * kInvSIn0;
 
-            double v = (u - ls0[j]) * g;
-            double y = v + ls0[j];
-            ls0[j] = y + v;
-            double st = y;
-            v = (st - ls1[j]) * g;
-            y = v + ls1[j];
-            ls1[j] = y + v;
-            st = y;
-            v = (st - ls2[j]) * g;
-            y = v + ls2[j];
-            ls2[j] = y + v;
-            st = y;
-            v = (st - ls3[j]) * g;
-            y = v + ls3[j];
-            ls3[j] = y + v;
-            yout[j] = y;
+            const double y1_0 = cG01[j] * phi + S01;
+            const double wMRaw = kBetaM * y1_0 + kBM;
+            const double wm = wMRaw < -1.5 ? -1.5 : (wMRaw > 1.5 ? 1.5 : wMRaw);
+            const double wm2 = wm * wm;
+            const double m1_0 =
+                (wm * (1.0 - kCubicC * wm2) - kHM0) * kInvBetaDHM0;
+            const double dpsi = (1.0 - kDerivC * wm2) * kInvDHM0;
+
+            const double uNr = cG4idk[j] * dpsi * dphi;
+            const double invNr = 1.0 - uNr * (1.0 - uNr * (1.0 - uNr));
+            const double step = (y3 - (cG23[j] * m1_0 + S23)) * invNr;
+
+            const double rawPhi = phi + dphi * (cDK[j] * step);
+            const double clampedPhi =
+                rawPhi < kPhiMin ? kPhiMin
+                                 : (rawPhi > kPhiMax ? kPhiMax : rawPhi);
+            const double a0u = cIdA0[j] * clampedPhi;
+
+            double v = (a0u - ls0[j]) * cg0[j];
+            const double y0 = v + ls0[j];
+            ls0[j] = y0 + v;
+
+            v = (cA1[j] * y0 - ls1[j]) * cg1[j];
+            const double y1 = v + ls1[j];
+            ls1[j] = y1 + v;
+
+            const double rawM1 = m1_0 + dpsi * (y1 - y1_0);
+            const double m1 =
+                rawM1 < kPsiMin ? kPsiMin : (rawM1 > kPsiMax ? kPsiMax : rawM1);
+
+            v = (cA2[j] * m1 - ls2[j]) * cg2[j];
+            const double y2 = v + ls2[j];
+            ls2[j] = y2 + v;
+
+            v = (cA3[j] * y2 - ls3[j]) * cg3[j];
+            const double y3Out = v + ls3[j];
+            ls3[j] = y3Out + v;
+            yout[j] = y3Out;
           }
 
           for (int j = 0; j < 8; ++j)
             outBuf[base + j][i] = (float)yout[j];
         }
       } else if (useFastInv) {
+        alignas(32) double cA0[8], cA1[8], cA2[8], cA3[8];
+        for (int j = 0; j < 8; ++j) {
+          const double tl = lTol[j];
+          cA0[j] = 1.0 + kDa0 * tl;
+          cA1[j] = 1.0 + kDa1 * tl;
+          cA2[j] = 1.0 + kDa2 * tl;
+          cA3[j] = 1.0 + kDa3 * tl;
+        }
         for (int i = 0; i < m; ++i) {
           alignas(32) double xin[8];
           for (int j = 0; j < 8; ++j)
@@ -398,56 +590,91 @@ template <int L> struct LadderBank {
             const double d = (ld[j] += ldd[j]);
             const double id = (lid[j] += ldid[j]);
 
-            const double g2 = g * g, g3 = g2 * g, g4 = g3 * g;
-            const double S =
-                (g3 * ls0[j] + g2 * ls1[j] + g * ls2[j] + ls3[j]) * (1.0 - g);
+            const double gStep = g * (1.0 - g) * lTol[j];
+            const double g0 = g + gStep * kDg0;
+            const double g1 = g + gStep * kDg1;
+            const double g2 = g + gStep * kDg2;
+            const double g3 = g + gStep * kDg3;
+
+            const double p0 = cA0[j] * g0, p1 = cA1[j] * g1;
+            const double p2 = cA2[j] * g2, p3 = cA3[j] * g3;
+            const double G01 = p1 * p0, G23 = p3 * p2, G4 = G23 * G01;
+            const double S01 = p1 * (1.0 - g0) * ls0[j] + (1.0 - g1) * ls1[j];
+            const double S23 = p3 * (1.0 - g2) * ls2[j] + (1.0 - g3) * ls3[j];
+
             const double x = xin[j] * (1.0 + 0.55 * kk);
+            const double G4did = G4 * (d * id);
+            const double G4idk = G4did * kk;
+            const double invPiv = 1.0 - G4idk * (1.0 - G4idk * (1.0 - G4idk));
+            const double y3 = (G4did * x + G23 * S01 + S23) * invPiv;
 
-            const double g4id = g4 * id;
-            const double g4idk = g4id * d * kk;
-            const double invPiv = 1.0 - g4idk * (1.0 - g4idk * (1.0 - g4idk));
-            const double y4 = (g4 * (d * id) * x + S) * invPiv;
-
-            const double arg = d * (x - kk * y4);
-            const double ac = arg < -6.0 ? -6.0 : (arg > 6.0 ? 6.0 : arg);
+            const double wIn = d * (x - kk * y3) + kBIn;
+            const double ac = wIn < -6.0 ? -6.0 : (wIn > 6.0 ? 6.0 : wIn);
             const double a2 = ac * ac;
-            const double th =
-                (ac * (34459425.0 +
-                       a2 * (4729725.0 +
-                             a2 * (135135.0 + a2 * (990.0 + a2))))) /
+            const double thIn =
+                (ac *
+                 (34459425.0 +
+                  a2 * (4729725.0 + a2 * (135135.0 + a2 * (990.0 + a2))))) /
                 (34459425.0 +
                  a2 * (16216200.0 +
                        a2 * (945945.0 + a2 * (13860.0 + 45.0 * a2))));
-            const double sech2 = 1.0 - th * th;
-            const double uNr = g4idk * sech2;
-            const double invNr = 1.0 - uNr * (1.0 - uNr * (1.0 - uNr));
-            const double step = (y4 - S - g4id * th) * invNr;
-            const double rawU = th + sech2 * (d * kk * step);
-            const double u =
-                id * (rawU < -1.0 ? -1.0 : (rawU > 1.0 ? 1.0 : rawU));
+            const double phi = (thIn - kTIn0) * kInvSIn0;
+            const double dphi = (1.0 - thIn * thIn) * kInvSIn0;
 
-            double v = (u - ls0[j]) * g;
-            double y = v + ls0[j];
-            ls0[j] = y + v;
-            double st = y;
-            v = (st - ls1[j]) * g;
-            y = v + ls1[j];
-            ls1[j] = y + v;
-            st = y;
-            v = (st - ls2[j]) * g;
-            y = v + ls2[j];
-            ls2[j] = y + v;
-            st = y;
-            v = (st - ls3[j]) * g;
-            y = v + ls3[j];
-            ls3[j] = y + v;
-            yout[j] = y;
+            const double y1_0 = G01 * (id * phi) + S01;
+            const double wMRaw = kBetaM * y1_0 + kBM;
+            const double wm = wMRaw < -1.5 ? -1.5 : (wMRaw > 1.5 ? 1.5 : wMRaw);
+            const double wm2 = wm * wm;
+            const double m1_0 =
+                (wm * (1.0 - kCubicC * wm2) - kHM0) * kInvBetaDHM0;
+            const double dpsi = (1.0 - kDerivC * wm2) * kInvDHM0;
+
+            const double uNr = G4idk * dpsi * dphi;
+            const double invNr = 1.0 - uNr * (1.0 - uNr * (1.0 - uNr));
+            const double step = (y3 - (G23 * m1_0 + S23)) * invNr;
+
+            const double rawPhi = phi + dphi * (d * kk * step);
+            const double clampedPhi =
+                rawPhi < kPhiMin ? kPhiMin
+                                 : (rawPhi > kPhiMax ? kPhiMax : rawPhi);
+            const double a0u = (cA0[j] * id) * clampedPhi;
+
+            double v = (a0u - ls0[j]) * g0;
+            const double y0 = v + ls0[j];
+            ls0[j] = y0 + v;
+
+            v = (cA1[j] * y0 - ls1[j]) * g1;
+            const double y1 = v + ls1[j];
+            ls1[j] = y1 + v;
+
+            const double rawM1 = m1_0 + dpsi * (y1 - y1_0);
+            const double m1 =
+                rawM1 < kPsiMin ? kPsiMin : (rawM1 > kPsiMax ? kPsiMax : rawM1);
+
+            v = (cA2[j] * m1 - ls2[j]) * g2;
+            const double y2 = v + ls2[j];
+            ls2[j] = y2 + v;
+
+            v = (cA3[j] * y2 - ls3[j]) * g3;
+            const double y3Out = v + ls3[j];
+            ls3[j] = y3Out + v;
+            yout[j] = y3Out;
           }
 
           for (int j = 0; j < 8; ++j)
             outBuf[base + j][i] = (float)yout[j];
         }
       } else {
+        // High-cutoff exact path (G >= 0.24): strictly bounded 3-step NR with
+        // exact Jacobian division
+        alignas(32) double cA0[8], cA1[8], cA2[8], cA3[8];
+        for (int j = 0; j < 8; ++j) {
+          const double tl = lTol[j];
+          cA0[j] = 1.0 + kDa0 * tl;
+          cA1[j] = 1.0 + kDa1 * tl;
+          cA2[j] = 1.0 + kDa2 * tl;
+          cA3[j] = 1.0 + kDa3 * tl;
+        }
         for (int i = 0; i < m; ++i) {
           alignas(32) double xin[8];
           for (int j = 0; j < 8; ++j)
@@ -463,38 +690,61 @@ template <int L> struct LadderBank {
             const double d = (ld[j] += ldd[j]);
             const double id = (lid[j] += ldid[j]);
 
-            const double g2 = g * g, g3 = g2 * g, g4 = g3 * g;
-            const double S =
-                (g3 * ls0[j] + g2 * ls1[j] + g * ls2[j] + ls3[j]) * (1.0 - g);
+            const double gStep = g * (1.0 - g) * lTol[j];
+            const double g0 = g + gStep * kDg0;
+            const double g1 = g + gStep * kDg1;
+            const double g2 = g + gStep * kDg2;
+            const double g3 = g + gStep * kDg3;
+
+            const double p0 = cA0[j] * g0, p1 = cA1[j] * g1;
+            const double p2 = cA2[j] * g2, p3 = cA3[j] * g3;
+            const double G01 = p1 * p0, G23 = p3 * p2, G4 = G23 * G01;
+            const double S01 = p1 * (1.0 - g0) * ls0[j] + (1.0 - g1) * ls1[j];
+            const double S23 = p3 * (1.0 - g2) * ls2[j] + (1.0 - g3) * ls3[j];
+
             const double x = xin[j] * (1.0 + 0.55 * kk);
+            const double G4did = G4 * (d * id);
+            const double G4idk = G4did * kk;
+            double y3 = (G4did * x + G23 * S01 + S23) / (1.0 + G4idk);
 
-            const double g4id = g4 * id;
-            const double g4idk = g4id * d * kk;
-            const double y4 = (g4 * (d * id) * x + S) / (1.0 + g4idk);
+            for (int it = 0; it < 3; ++it) {
+              const double thIn = fastTanhLadder(d * (x - kk * y3) + kBIn);
+              const double phi = (thIn - kTIn0) * kInvSIn0;
+              const double dphi = (1.0 - thIn * thIn) * kInvSIn0;
+              const double y1Try = G01 * (id * phi) + S01;
+              const double wm = std::clamp(kBetaM * y1Try + kBM, -1.5, 1.5);
+              const double wm2 = wm * wm;
+              const double m1Try =
+                  (wm * (1.0 - kCubicC * wm2) - kHM0) * kInvBetaDHM0;
+              const double dpsi = (1.0 - kDerivC * wm2) * kInvDHM0;
+              const double res = y3 - (G23 * m1Try + S23);
+              const double jac = 1.0 + G4idk * dpsi * dphi;
+              y3 -= res / jac;
+            }
 
-            const double th = fastTanhLadder(d * (x - kk * y4));
-            const double sech2 = 1.0 - th * th;
-            const double step = (y4 - S - g4id * th) / (1.0 + g4idk * sech2);
-            const double rawU = th + sech2 * (d * kk * step);
-            const double u =
-                id * (rawU < -1.0 ? -1.0 : (rawU > 1.0 ? 1.0 : rawU));
+            const double thF = fastTanhLadder(d * (x - kk * y3) + kBIn);
+            const double a0u = (cA0[j] * id) * (thF - kTIn0) * kInvSIn0;
 
-            double v = (u - ls0[j]) * g;
-            double y = v + ls0[j];
-            ls0[j] = y + v;
-            double st = y;
-            v = (st - ls1[j]) * g;
-            y = v + ls1[j];
-            ls1[j] = y + v;
-            st = y;
-            v = (st - ls2[j]) * g;
-            y = v + ls2[j];
-            ls2[j] = y + v;
-            st = y;
-            v = (st - ls3[j]) * g;
-            y = v + ls3[j];
-            ls3[j] = y + v;
-            yout[j] = y;
+            double v = (a0u - ls0[j]) * g0;
+            const double y0 = v + ls0[j];
+            ls0[j] = y0 + v;
+
+            v = (cA1[j] * y0 - ls1[j]) * g1;
+            const double y1 = v + ls1[j];
+            ls1[j] = y1 + v;
+
+            const double wmF = std::clamp(kBetaM * y1 + kBM, -1.5, 1.5);
+            const double m1 =
+                (wmF * (1.0 - kCubicC * wmF * wmF) - kHM0) * kInvBetaDHM0;
+
+            v = (cA2[j] * m1 - ls2[j]) * g2;
+            const double y2 = v + ls2[j];
+            ls2[j] = y2 + v;
+
+            v = (cA3[j] * y2 - ls3[j]) * g3;
+            const double y3Out = v + ls3[j];
+            ls3[j] = y3Out + v;
+            yout[j] = y3Out;
           }
 
           for (int j = 0; j < 8; ++j)
@@ -504,10 +754,10 @@ template <int L> struct LadderBank {
 
       for (int j = 0; j < 8; ++j) {
         const int l = base + j;
-        s0[l] = ls0[j];
-        s1[l] = ls1[j];
-        s2[l] = ls2[j];
-        s3[l] = ls3[j];
+        s0[l] = flushDenormal(ls0[j]);
+        s1[l] = flushDenormal(ls1[j]);
+        s2[l] = flushDenormal(ls2[j]);
+        s3[l] = flushDenormal(ls3[j]);
         G[l] = lG[j];
         k[l] = lk[j];
         drv[l] = ld[j];
@@ -915,9 +1165,8 @@ public:
         const double x = (double)std::min(
             1.25f, fmIdx.next() + fmEnvAmt.next() * fmEnvLevel);
         fmEnvLevel *= fmEnvMul;
-        const float ph =
-            (float)(fmPhase + 0.11 * (double)fmFbR.next() *
-                                  (double)(fmY1 + fmY2));
+        const float ph = (float)(fmPhase + 0.11 * (double)fmFbR.next() *
+                                               (double)(fmY1 + fmY2));
         const double y = (double)fastSin01(ph);
         fmY2 = fmY1;
         fmY1 = (float)y;
@@ -1016,6 +1265,8 @@ public:
 
   void prepare(float baseSr) {
     osr = (float)kOs * baseSr;
+    ladA.setSampleRate((double)osr);
+    ladB.setSampleRate((double)osr);
     for (int i = 0; i < kVoices; ++i) {
       voices[(size_t)i].prepare(baseSr, (float)kOs, (uint32_t)(i * 7717 + 101));
       lastCutA[i] = lastCutB[i] = -1.0f;
@@ -1157,10 +1408,12 @@ public:
           lastCutB[v] = cB;
           cachedGB[v] = LadderBank<kVoices>::coefGD((double)cB, (double)osr);
         }
-        ladA.setLane(v, cachedGA[v], 4.3 * (double)rA, (double)drive,
-                     ctrlSpanOs, snap);
-        ladB.setLane(v, cachedGB[v], 4.3 * (double)rB, (double)drive,
-                     ctrlSpanOs, snap);
+        double gA = cachedGA[v], kA = 4.3 * (double)rA;
+        double gB = cachedGB[v], kB = 4.3 * (double)rB;
+        ladA.applyBiasSag(v, gA, kA);
+        ladB.applyBiasSag(v, gB, kB);
+        ladA.setLane(v, gA, kA, (double)drive, ctrlSpanOs, snap);
+        ladB.setLane(v, gB, kB, (double)drive, ctrlSpanOs, snap);
       }
     }
     if (activeMask == 0u) {
