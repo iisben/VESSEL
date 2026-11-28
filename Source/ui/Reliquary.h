@@ -81,7 +81,7 @@ public:
     void drawTextEditorOutline (juce::Graphics&, int w, int h, juce::TextEditor&) override;
     juce::Font getLabelFont (juce::Label&) override { return type::value (13.5f); }
     void drawTooltip (juce::Graphics&, const juce::String&, int w, int h) override;
-    /** The window-size grip: a sigil of three diamonds stepping into a bracketed corner. */
+    /** Invisible window-size grip: retains corner drag-to-resize without drawing a corner graphic. */
     void drawCornerResizer (juce::Graphics&, int w, int h, bool isMouseOver, bool isMouseDragging) override;
 };
 } // namespace vessel::ui

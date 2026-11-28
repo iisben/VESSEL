@@ -570,31 +570,8 @@ void ReliquaryLookAndFeel::drawTooltip (juce::Graphics& g, const juce::String& t
     g.drawFittedText (text, juce::Rectangle<int> (w, h).reduced (6, 2), juce::Justification::centredLeft, 3);
 }
 
-void ReliquaryLookAndFeel::drawCornerResizer (juce::Graphics& g, int w, int h, bool over, bool dragging)
+void ReliquaryLookAndFeel::drawCornerResizer (juce::Graphics&, int, int, bool, bool)
 {
-    using namespace ink;
-    const float W = (float) w, H = (float) h;
-    const auto tone = dragging ? frost : over ? violet : violet.withAlpha (0.78f);
-
-    // a faint wedge of ink pooling into the corner
-    juce::Path wedge;
-    wedge.addTriangle (W, H * 0.18f, W, H, W * 0.18f, H);
-    g.setGradientFill (juce::ColourGradient (violet.withAlpha (over || dragging ? 0.30f : 0.16f), W, H, violet.withAlpha (0.0f), W * 0.45f, H * 0.45f, true));
-    g.fillPath (wedge);
-
-    // the bracket: two hairlines meeting at the corner, broken at the joint
-    g.setColour (tone.withAlpha (0.9f));
-    g.fillRect (juce::Rectangle<float> (W * 0.30f, H - 1.6f, W * 0.52f, 1.6f));
-    g.fillRect (juce::Rectangle<float> (W - 1.6f, H * 0.30f, 1.6f, H * 0.52f));
-
-    // three diamonds stepping into the corner, growing as they go
-    for (int i = 0; i < 3; ++i)
-    {
-        const float t = 0.30f + 0.20f * (float) i;
-        const float size = 3.0f + 1.4f * (float) i;
-        g.setColour (tone.withAlpha (0.45f + 0.27f * (float) i));
-        g.fillPath (diamond ({ W * t + 1.0f, H * t + 1.0f }, size));
-    }
-    if (dragging) { g.setColour (frost.withAlpha (0.25f)); g.fillEllipse (juce::Rectangle<float> (6.0f, 6.0f).withCentre ({ W - 4.0f, H - 4.0f })); }
+    // Intentionally invisible; ResizableCornerComponent still handles hit-testing and drag resizing.
 }
 } // namespace vessel::ui
