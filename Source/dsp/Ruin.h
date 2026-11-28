@@ -510,6 +510,11 @@ public:
         tube.prepare (osr);
         bias.prepare (osr);
         tilt[0].reset(); tilt[1].reset();
+        for (int c = 0; c < 2; ++c)
+        {
+            outDc[c].setup (10.0, 0.7071067811865476, (double) baseSr);
+            outDc[c].reset();
+        }
         biasFade.prepare (osr);
         dry.setSize (2, maxBlock * 4);
         resetPads();
@@ -534,6 +539,7 @@ public:
         tube.resetState();
         bias.resetState();
         tilt[0].reset(); tilt[1].reset();
+        outDc[0].reset(); outDc[1].reset();
         resetPads();
     }
 
@@ -611,6 +617,11 @@ public:
         }
 
         os.processDown (l, r, n);
+        for (int i = 0; i < n; ++i)
+        {
+            l[i] = outDc[0].highpass (l[i]);
+            r[i] = outDc[1].highpass (r[i]);
+        }
     }
 
 private:
@@ -625,6 +636,7 @@ private:
     TubeDrive tube;
     BiasModulator bias;
     Tilt tilt[2];
+    Svf outDc[2];
     BypassFade biasFade;
     juce::AudioBuffer<float> dry;
     float padBuf[2][4] {};
