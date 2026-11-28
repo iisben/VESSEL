@@ -1723,8 +1723,279 @@ GateResult runGate4()
                            + "dBc, DC=" + fmt (dispWorstDc, 1) + "dBFS, oddRes=" + fmt (dispOddResDb, 1)
                            + "dBFS [" + (dispOk ? "OK" : "FAIL") + "]");
 
-    const double worstAllAlias = std::max ({ worstFltAlias, fbWorstAlias, railWorstAlias, dispWorstAlias });
-    const double worstAllDc    = std::max ({ worstFltDc, fbWorstDc, railWorstDc, dispWorstDc });
+    // Part I: BBD Analog Chorus (clock-rate modulated 64-bit Hermite delay lines, NE570 compander,
+    // 6-10 kHz dark analog anti-imaging LPF, sub-120 Hz phase coherence, 44.1..192 kHz, C6/6kHz aliasing < -75 dBc,
+    // DC < -90 dBFS, 0 added latency, odd-block < -100 dBFS)
+    bool bbdOk = true;
+    double bbdDarkDropDb = 0.0, bbdSub120Corr = 1.0, bbdSubDropDb = 0.0, bbdWideRatio = 0.0;
+    double bbdCompTrackErrDb = 0.0, bbdWorstAlias = -300.0, bbdWorstDc = -300.0, bbdOddResDb = -300.0;
+    {
+        // 1) Multi-rate (44.1..192 kHz) stability, all 3 modes, and 6..10 kHz dark analog anti-imaging LPF check
+        for (double rSr : { 44100.0, 48000.0, 96000.0, 192000.0 })
+        {
+            for (int mode : { 1, 2, 3 })
+            {
+                dsp::BbdChorus bbd;
+                bbd.prepare (rSr);
+                const int nTest = (int) (0.25 * rSr);
+                for (int pos = 0; pos < nTest; pos += 64)
+                {
+                    const int m = std::min (64, nTest - pos);
+                    float bl[64], br[64];
+                    for (int i = 0; i < m; ++i)
+                    {
+                        const double t = (double) (pos + i) / rSr;
+                        const float s = (float) (0.35 * std::sin (kTwoPiD * 80.0 * t) + 0.35 * std::sin (kTwoPiD * 1400.0 * t));
+                        bl[i] = br[i] = s;
+                    }
+                    const double u = 0.5 + 0.5 * std::sin (kTwoPiD * 5.0 * (double) pos / rSr);
+                    dsp::BbdChorus::Params bp { true, mode, (float) (0.05 + 7.95 * u), (float) u,
+                                                (float) (6000.0 + 4000.0 * (1.0 - u)), (float) (0.2 + 0.8 * u) };
+                    bbd.process (bl, br, m, bp, true, 64);
+                    for (int i = 0; i < m; ++i)
+                        if (! std::isfinite (bl[i]) || ! std::isfinite (br[i]) || std::abs (bl[i]) > 10.0f) bbdOk = false;
+                }
+            }
+
+            // Anti-imaging LPF check at 48 kHz: 14 kHz attenuation at tone=6 kHz vs tone=10 kHz (100% wet)
+            if (std::abs (rSr - 48000.0) < 1.0)
+            {
+                auto measureToneGainDb = [&] (float toneHz, double testHz)
+                {
+                    dsp::BbdChorus bbd;
+                    bbd.prepare (rSr);
+                    const int N = (int) (0.5 * rSr);
+                    std::vector<float> bl ((size_t) N), br ((size_t) N);
+                    for (int i = 0; i < N; ++i)
+                        bl[(size_t) i] = br[(size_t) i] = (float) (0.35 * std::sin (kTwoPiD * testHz * (double) i / rSr));
+                    dsp::BbdChorus::Params bp { true, dsp::BbdChorus::ModeI, 0.55f, 0.0f, toneHz, 1.0f };
+                    for (int pos = 0; pos < N; pos += 64)
+                        bbd.process (bl.data() + pos, br.data() + pos, std::min (64, N - pos), bp, true, 64);
+                    double sqOut = 0.0, sqIn = 0.0;
+                    for (int i = N / 2; i < N; ++i)
+                    {
+                        sqOut += (double) bl[(size_t) i] * bl[(size_t) i];
+                        sqIn  += 0.35 * 0.35 * 0.5;
+                    }
+                    return powToDb ((sqOut + 1.0e-30) / (sqIn + 1.0e-30));
+                };
+                const double g14kAt6k  = measureToneGainDb (6000.0f, 14000.0);
+                const double g14kAt10k = measureToneGainDb (10000.0f, 14000.0);
+                const double g1kAt8k   = measureToneGainDb (8000.0f, 1000.0);
+                bbdDarkDropDb = g14kAt6k;
+                if (g14kAt6k > -20.0 || (g14kAt10k - g14kAt6k) < 10.0 || std::abs (g1kAt8k) > 1.5) bbdOk = false;
+
+                // Compander steady-state unity tracking across -20 dBFS and -6 dBFS (1 kHz, 100% wet)
+                auto measureLevelOutDb = [&] (double inAmp)
+                {
+                    dsp::BbdChorus bbd;
+                    bbd.prepare (rSr);
+                    const int N = (int) (0.6 * rSr);
+                    std::vector<float> bl ((size_t) N), br ((size_t) N);
+                    for (int i = 0; i < N; ++i)
+                        bl[(size_t) i] = br[(size_t) i] = (float) (inAmp * std::sin (kTwoPiD * 1000.0 * (double) i / rSr));
+                    dsp::BbdChorus::Params bp { true, dsp::BbdChorus::ModeI, 0.55f, 0.0f, 8000.0f, 1.0f };
+                    for (int pos = 0; pos < N; pos += 64)
+                        bbd.process (bl.data() + pos, br.data() + pos, std::min (64, N - pos), bp, true, 64);
+                    double sq = 0.0;
+                    for (int i = N / 2; i < N; ++i) sq += (double) bl[(size_t) i] * bl[(size_t) i];
+                    return linToDb (std::sqrt (sq / (double) (N - N / 2)) / (inAmp * 0.70710678));
+                };
+                const double errLo = std::abs (measureLevelOutDb (0.10));
+                const double errHi = std::abs (measureLevelOutDb (0.50));
+                bbdCompTrackErrDb = std::max (errLo, errHi);
+                if (bbdCompTrackErrDb > 1.0) bbdOk = false;
+            }
+        }
+
+        // 2) Sub-120 Hz phase coherence & zero bass hollowing + massive stereo spread above 200 Hz (mono_on = 0!)
+        {
+            auto renderBassWide = [&] (int bbdMode)
+            {
+                auto p = makeProcessor (sr, 512);
+                setCleanDryPatch (*p);
+                setP (*p, sub_on, 1.0f);
+                setP (*p, sub1_level, 0.85f);
+                setP (*p, sub2_level, 0.50f);
+                setP (*p, wt_level, 0.65f);
+                setP (*p, wt_morph, 2.0f / 7.0f);
+                setP (*p, wt_drift, 0.0f);
+                setP (*p, flt_on, 1.0f);
+                setP (*p, flt_a_cut, 3200.0f);
+                setP (*p, flt_env, 0.0f);
+                setP (*p, mono_on, 0.0f);
+                setP (*p, v2_bbd_mode, (float) bbdMode);
+                setP (*p, v2_bbd_rate, 0.65f);
+                setP (*p, v2_bbd_depth, 0.80f);
+                setP (*p, v2_bbd_tone, 8000.0f);
+                setP (*p, v2_bbd_mix, 0.65f);
+                p->prepareToPlay (sr, 512);
+                if (p->getLatencySamples() != 0) bbdOk = false;
+                return renderEvents (*p, sr, (int) (1.2 * sr), { 512 }, {
+                    { 0, juce::MidiMessage::noteOn (1, 36, 0.95f) },   // C2 ~ 65.4 Hz
+                    { 0, juce::MidiMessage::noteOn (1, 43, 0.85f) },   // G2 ~ 98.0 Hz
+                    { 0, juce::MidiMessage::noteOn (1, 60, 0.85f) },   // C4 ~ 261.6 Hz
+                    { 0, juce::MidiMessage::noteOn (1, 67, 0.80f) },   // G4 ~ 392.0 Hz
+                });
+            };
+            auto rDry = renderBassWide (0);
+            auto rEns = renderBassWide (3);   // Ensemble (4-tap widest mode)
+            if (rEns.nonFiniteCount > 0) bbdOk = false;
+
+            dsp::Svf lpL1, lpL2, lpR1, lpR2, dryLp1, dryLp2, hiL, hiR;
+            lpL1.setup (120.0, 0.70710678, sr); lpL2.setup (120.0, 0.70710678, sr);
+            lpR1.setup (120.0, 0.70710678, sr); lpR2.setup (120.0, 0.70710678, sr);
+            dryLp1.setup (120.0, 0.70710678, sr); dryLp2.setup (120.0, 0.70710678, sr);
+            hiL.setup (250.0, 0.70710678, sr); hiR.setup (250.0, 0.70710678, sr);
+
+            double sLL = 0.0, sRR = 0.0, sLR = 0.0, drySubSq = 0.0, wetMidSq = 0.0, wetSideSq = 0.0;
+            const int nTot = (int) rEns.l.size();
+            for (int i = 0; i < nTot; ++i)
+            {
+                const double sl = (double) lpL2.lowpass (lpL1.lowpass (rEns.l[(size_t) i]));
+                const double srS = (double) lpR2.lowpass (lpR1.lowpass (rEns.r[(size_t) i]));
+                const double sd = (double) dryLp2.lowpass (dryLp1.lowpass (0.5f * (rDry.l[(size_t) i] + rDry.r[(size_t) i])));
+                const double hl = (double) hiL.highpass (rEns.l[(size_t) i]);
+                const double hr = (double) hiR.highpass (rEns.r[(size_t) i]);
+                if (i >= nTot / 4)
+                {
+                    sLL += sl * sl; sRR += srS * srS; sLR += sl * srS;
+                    drySubSq += sd * sd;
+                    const double hm = 0.5 * (hl + hr), hs = 0.5 * (hl - hr);
+                    wetMidSq += hm * hm; wetSideSq += hs * hs;
+                }
+            }
+            bbdSub120Corr = sLR / std::sqrt (sLL * sRR + 1.0e-30);
+            bbdSubDropDb = std::abs (powToDb ((0.5 * (sLL + sRR) + 1.0e-30) / (drySubSq + 1.0e-30)));
+            bbdWideRatio = std::sqrt ((wetSideSq + 1.0e-30) / (wetMidSq + 1.0e-30));
+            if (bbdSub120Corr < 0.990 || bbdSubDropDb > 0.6 || bbdWideRatio < 0.25) bbdOk = false;
+        }
+
+        // 3) Aliasing (< -75 dBc) & DC (< -90 dBFS) at C6 saw & ~6 kHz sine (static-clock AND clock-modulated BBD!)
+        {
+            const int order = 16;
+            const int N = 1 << order;
+            const int totalB = N + 16384;
+
+            // 3a: Static-clock full BBD chain (pre/de-emphasis, NE570 compander, ADAA1 saturation, 64-bit Hermite, 8 kHz LPF)
+            for (int kind = 0; kind < 2; ++kind)
+            {
+                auto p = makeProcessor (sr, 512);
+                setCleanDryPatch (*p);
+                setP (*p, wt_level, 0.70f);
+                setP (*p, wt_morph, kind == 0 ? (2.0f / 7.0f) : 0.0f);
+                setP (*p, v2_bbd_mode, 2.0f);   // Mode II (512-stage + regen)
+                setP (*p, v2_bbd_rate, 0.55f);
+                setP (*p, v2_bbd_depth, 0.0f);  // static fractional clock delay
+                setP (*p, v2_bbd_tone, 8000.0f);
+                setP (*p, v2_bbd_mix, 1.0f);    // 100% wet BBD path
+                p->prepareToPlay (sr, 512);
+                const int midi = kind == 0 ? 84 : 114;
+                auto r = renderEvents (*p, sr, totalB, { 512 }, { { 0, juce::MidiMessage::noteOn (1, midi, 1.0f) } });
+                if (r.nonFiniteCount > 0) bbdOk = false;
+                const auto am = measureHarmonicAliasing (r.l, sr, midiToHzD (midi), order);
+                bbdWorstAlias = std::max (bbdWorstAlias, am.aliasedDbc);
+                bbdWorstDc = std::max (bbdWorstDc, am.dcDbfs);
+            }
+
+            // 3b: Actively clock-modulated BBD chorus (Modes I, II, Ensemble) @ C6 saw & 6 kHz sine
+            // Excludes only physical Carson FM Doppler band around valid harmonics so Hermite sweep imaging & folded aliases are strictly caught
+            for (int mode : { 1, 2, 3 })
+            {
+                for (int kind = 0; kind < 2; ++kind)
+                {
+                    auto p = makeProcessor (sr, 512);
+                    setCleanDryPatch (*p);
+                    setP (*p, wt_level, 0.70f);
+                    setP (*p, wt_morph, kind == 0 ? (2.0f / 7.0f) : 0.0f);
+                    setP (*p, v2_bbd_mode, (float) mode);
+                    setP (*p, v2_bbd_rate, 0.55f);
+                    setP (*p, v2_bbd_depth, 0.65f);
+                    setP (*p, v2_bbd_tone, 8000.0f);
+                    setP (*p, v2_bbd_mix, 1.0f);
+                    p->prepareToPlay (sr, 512);
+                    const int midi = kind == 0 ? 84 : 114;
+                    const double f0 = midiToHzD (midi);
+                    auto r = renderEvents (*p, sr, totalB, { 512 }, { { 0, juce::MidiMessage::noteOn (1, midi, 1.0f) } });
+                    if (r.nonFiniteCount > 0) bbdOk = false;
+
+                    const size_t start = r.l.size() - (size_t) N;
+                    auto sp = bhSpectrumPow (r.l, start, order);
+                    const double binHz = sr / (double) N;
+                    const double nyq = 0.5 * sr;
+                    const double bandHi = std::min (20000.0, 0.45 * sr);
+                    double sigPow = 0.0, aliasPow = 0.0;
+                    // Physical Doppler FM deviation band (accounts for Mode II dark regen passes while catching Hermite/alias spurs)
+                    for (int k = 5; k < N / 2 - 4; ++k)
+                    {
+                        const double f = (double) k * binHz;
+                        if (f < 20.0 || f > bandHi) continue;
+                        const double h = std::round (f / f0);
+                        const double nearest = h * f0;
+                        const double carsonHalf = 0.025 * nearest + 15.0;
+                        if (h >= 1.0 && nearest < nyq && std::abs (f - nearest) <= carsonHalf)
+                            sigPow += sp[(size_t) k];
+                        else
+                            aliasPow += sp[(size_t) k];
+                    }
+                    const double modAliasDbc = powToDb ((aliasPow + 1.0e-30) / (sigPow + 1.0e-30));
+                    const double modDcDbfs = windowedDcDbfs (r.l, start, (size_t) N);
+                    bbdWorstAlias = std::max (bbdWorstAlias, modAliasDbc);
+                    bbdWorstDc = std::max (bbdWorstDc, modDcDbfs);
+                }
+            }
+            if (bbdWorstAlias >= -75.0 || bbdWorstDc >= -90.0) bbdOk = false;
+        }
+
+        // 4) Odd-block invariance with BBD Ensemble + LFO modulating rate & tone
+        auto setupBbdOdd = [] (VesselProcessor& p)
+        {
+            setCleanDryPatch (p);
+            setP (p, sub_on, 1.0f);
+            setP (p, flt_on, 1.0f);
+            setP (p, flt_a_cut, 2600.0f);
+            setP (p, v2_bbd_mode, 3.0f);
+            setP (p, v2_bbd_rate, 0.85f);
+            setP (p, v2_bbd_depth, 0.70f);
+            setP (p, v2_bbd_tone, 7600.0f);
+            setP (p, v2_bbd_mix, 0.60f);
+            setP (p, lfo1_shape, 0.0f);
+            setP (p, lfo1_rate, 2.5f);
+            setP (p, lfo1_dest1, (float) destIndexOf (v2_bbd_tone));
+            setP (p, lfo1_amt1, 0.35f);
+            setP (p, lfo1_dest2, (float) destIndexOf (v2_bbd_rate));
+            setP (p, lfo1_amt2, 0.25f);
+            maybeSeedQa (p, 0xBBD00001u);
+        };
+        const int nOdd = (int) (0.5 * sr);
+        const std::vector<MidiEvent> evOdd {
+            { 0,     juce::MidiMessage::noteOn (1, 48, 0.9f) },
+            { 4000,  juce::MidiMessage::noteOn (1, 55, 0.85f) },
+            { 14000, juce::MidiMessage::noteOff (1, 48) },
+        };
+        auto pR = makeProcessor (sr, 512); setupBbdOdd (*pR); pR->prepareToPlay (sr, 512); maybeSeedQa (*pR, 0xBBD00001u);
+        auto rR = renderEvents (*pR, sr, nOdd, { 512 }, evOdd);
+        auto pO = makeProcessor (sr, 2048); setupBbdOdd (*pO); pO->prepareToPlay (sr, 2048); maybeSeedQa (*pO, 0xBBD00001u);
+        auto rO = renderEvents (*pO, sr, nOdd, { 0, 1, 7, 13, 64, 137, 2048 }, evOdd);
+        double dSq = 0.0;
+        for (int i = 0; i < nOdd; ++i)
+        {
+            const double dl = (double) rR.l[(size_t) i] - (double) rO.l[(size_t) i];
+            const double dr = (double) rR.r[(size_t) i] - (double) rO.r[(size_t) i];
+            dSq += 0.5 * (dl * dl + dr * dr);
+        }
+        bbdOddResDb = linToDb (std::sqrt (dSq / (double) nOdd));
+        if (rO.nonFiniteCount > 0 || bbdOddResDb >= -100.0) bbdOk = false;
+    }
+    if (! bbdOk) res.status = GateStatus::Fail;
+    res.details.push_back ("BBD Analog Chorus (Modes I/II/Ens, 44.1..192k): 14k@6k=" + fmt (bbdDarkDropDb, 1)
+                           + "dB, compErr=" + fmt (bbdCompTrackErrDb, 2) + "dB, sub120Corr=" + fmt (bbdSub120Corr, 4)
+                           + ", subDrop=" + fmt (bbdSubDropDb, 2) + "dB, wideS/M=" + fmt (bbdWideRatio, 2)
+                           + ", alias=" + fmt (bbdWorstAlias, 1) + "dBc, DC=" + fmt (bbdWorstDc, 1)
+                           + "dBFS, oddRes=" + fmt (bbdOddResDb, 1) + "dBFS [" + (bbdOk ? "OK" : "FAIL") + "]");
+
+    const double worstAllAlias = std::max ({ worstFltAlias, fbWorstAlias, railWorstAlias, dispWorstAlias, bbdWorstAlias });
+    const double worstAllDc    = std::max ({ worstFltDc, fbWorstDc, railWorstDc, dispWorstDc, bbdWorstDc });
     res.summary = "modStab=" + std::string (stabOk ? "OK" : "FAIL")
                 + ", SVF=" + fmt (maxSvfCents, 2) + "ct, Lad=" + fmt (maxLadCents, 2)
                 + "ct, SK=" + fmt (maxSkCents, 2) + "ct, rateDiff=" + fmt (maxLadRateDiffDb, 3)
@@ -2308,6 +2579,64 @@ GateResult runGate8 (bool ciVmMode)
                                + fmt (railDispRtPct, 2) + "% RT, delta=" + (railDispDeltaPct >= 0.0 ? "+" : "")
                                + fmt (railDispDeltaPct, 2) + "% RT, lim<+2.5%) [" + (rdOk ? "OK" : "FAIL") + "]");
     }
+    // Also measure 16-voice Release CPU delta with BBD Analog Chorus (Ensemble 4-tap worst case) active (lim < +2.5% RT)
+    double bbdRtPct = 0.0, bbdDeltaPct = 0.0;
+    {
+        auto pBbd = makeProcessor (sr, blk);
+        setCleanDryPatch (*pBbd);
+        setP (*pBbd, sub_on, 1.0f);
+        setP (*pBbd, wt_on, 1.0f);
+        setP (*pBbd, wt_morph, 0.45f);
+        setP (*pBbd, wt_pwm, 0.35f);
+        setP (*pBbd, wt_drift, 0.25f);
+        setP (*pBbd, fm_on, 1.0f);
+        setP (*pBbd, fm_index, 0.45f);
+        setP (*pBbd, flt_on, 1.0f);
+        setP (*pBbd, flt_route, 0.0f);
+        setP (*pBbd, flt_a_cut, 1600.0f);
+        setP (*pBbd, flt_a_res, 0.45f);
+        setP (*pBbd, flt_b_cut, 4200.0f);
+        setP (*pBbd, flt_b_res, 0.35f);
+        setP (*pBbd, flt_drive, 0.4f);
+        setP (*pBbd, tube_on, 1.0f);
+        setP (*pBbd, tube_drive, 0.45f);
+        setP (*pBbd, bias_on, 1.0f);
+        setP (*pBbd, v2_bbd_mode, 3.0f);   // Ensemble (4-tap dual-BBD worst case)
+        setP (*pBbd, v2_bbd_rate, 0.65f);
+        setP (*pBbd, v2_bbd_depth, 0.75f);
+        setP (*pBbd, v2_bbd_tone, 8000.0f);
+        setP (*pBbd, v2_bbd_mix, 0.55f);
+        setP (*pBbd, verb_on, 1.0f);
+        setP (*pBbd, ott_on, 1.0f);
+        setP (*pBbd, mono_on, 1.0f);
+        setP (*pBbd, clip_on, 1.0f);
+        setP (*pBbd, amp_a, 5.0f);
+        setP (*pBbd, amp_s, 1.0f);
+        setP (*pBbd, amp_r, 2000.0f);
+        pBbd->prepareToPlay (sr, blk);
+
+        buf.clear();
+        pBbd->processBlock (buf, chordMidi);
+        for (int w = 0; w < 32; ++w) { buf.clear(); pBbd->processBlock (buf, emptyMidi); }
+        std::vector<double> usBbd;
+        usBbd.reserve (kBlocks);
+        for (int b = 0; b < kBlocks; ++b)
+        {
+            buf.clear();
+            const auto t0 = std::chrono::steady_clock::now();
+            pBbd->processBlock (buf, emptyMidi);
+            const auto t1 = std::chrono::steady_clock::now();
+            usBbd.push_back (std::chrono::duration<double, std::micro> (t1 - t0).count());
+        }
+        std::sort (usBbd.begin(), usBbd.end());
+        bbdRtPct = usBbd[usBbd.size() / 2] / blockBudgetUs * 100.0;
+        bbdDeltaPct = bbdRtPct - rtPct;
+        const bool bbdCpuOk = ciVmMode || (bbdDeltaPct < 2.5);
+        if (! bbdCpuOk) res.status = GateStatus::Fail;
+        res.details.push_back ("BBD Ensemble 16v stress: median=" + fmt (usBbd[usBbd.size() / 2], 1) + " us ("
+                               + fmt (bbdRtPct, 2) + "% RT, delta=" + (bbdDeltaPct >= 0.0 ? "+" : "")
+                               + fmt (bbdDeltaPct, 2) + "% RT, lim<+2.5%) [" + (bbdCpuOk ? "OK" : "FAIL") + "]");
+    }
 #ifndef NDEBUG
     res.details.push_back ("WARNING: Built without NDEBUG (not Release -O3)");
 #endif
@@ -2316,7 +2645,8 @@ GateResult runGate8 (bool ciVmMode)
                            + "% RT, " + std::string (ciVmMode ? "CI-VM info" : "lim<15.0%") + "), p95=" + fmt (p95Us, 1)
                            + " us (" + fmt (p95Pct, 2) + "% RT) [" + (ok ? "OK" : "FAIL") + "]");
     res.summary = std::to_string (activeVoices) + "v median=" + fmt (medUs, 1) + "us (" + fmt (rtPct, 2)
-                + "% RT), rail+disp=" + fmt (railDispRtPct, 2) + "% (d=" + (railDispDeltaPct >= 0.0 ? "+" : "")
+                + "% RT), bbd=" + fmt (bbdRtPct, 2) + "% (d=" + (bbdDeltaPct >= 0.0 ? "+" : "")
+                + fmt (bbdDeltaPct, 2) + "%), rail+disp=" + fmt (railDispRtPct, 2) + "% (d=" + (railDispDeltaPct >= 0.0 ? "+" : "")
                 + fmt (railDispDeltaPct, 2) + "%), lpg+fb=" + fmt (lpgFbRtPct, 2) + "% (d="
                 + (cpuDeltaPct >= 0.0 ? "+" : "") + fmt (cpuDeltaPct, 2) + "%), p95=" + fmt (p95Pct, 2) + "% RT";
     return res;

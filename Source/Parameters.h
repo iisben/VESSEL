@@ -440,7 +440,13 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (v2_rail_time,     "Rail Recovery",  Float, 20, 80, 45.0f, 45, 0, Ms,  "") \
     F (v2_disp_stages,   "Phase Disperse", Choice, 0, 5, 0,       0, 1, None, "Off|4 Stg|5 Stg|6 Stg|7 Stg|8 Stg") \
     F (v2_disp_freq,     "Disperse Freq",  Float, 40, 2000, 180.0f, 220, 0, Hz, "") \
-    F (v2_disp_pinch,    "Disperse Pinch", Float,  0, 1, 0.50f,   0, 0, Pct, "")
+    F (v2_disp_pinch,    "Disperse Pinch", Float,  0, 1, 0.50f,   0, 0, Pct, "") \
+    /* ── V2 Boutique Analog Realism: BBD Analog Chorus (append-only, Off default) ── */ \
+    F (v2_bbd_mode,      "BBD Chorus",     Choice, 0, 3, 0,       0, 1, None, "Off|Mode I|Mode II|Ensemble") \
+    F (v2_bbd_rate,      "BBD Rate",       Float,  0.05f, 8.0f, 0.55f, 0.8f, 0, Hz, "") \
+    F (v2_bbd_depth,     "BBD Depth",      Float,  0, 1, 0.55f,   0, 0, Pct, "") \
+    F (v2_bbd_tone,      "BBD Tone",       Float,  6000, 10000, 8000, 8000, 0, Hz, "") \
+    F (v2_bbd_mix,       "BBD Mix",        Float,  0, 1, 0.50f,   0, 0, Pct, "")
 
 enum PID : int
 {

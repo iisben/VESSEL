@@ -294,6 +294,7 @@ private:
     vessel::dsp::FormantFilter formant;
     vessel::dsp::Resonator resonator;
     vessel::dsp::ZAxis zaxis;
+    vessel::dsp::BbdChorus bbdChorus;
     juce::dsp::Convolution convolution { juce::dsp::Convolution::NonUniform { 512 } };
     vessel::dsp::BlackHole blackHole;
     vessel::dsp::HaasWidener haas;
@@ -307,7 +308,7 @@ private:
     vessel::dsp::DelayLine subAlign;
     vessel::dsp::Smooth convMixS;
     vessel::dsp::Ramp inLevelR, sendR, cleanR;
-    vessel::dsp::BypassFade fGran, fUnmask, fCrush, fDisp, fVhs, fFollow, fFormant, fOtt, fMono, fRes;
+    vessel::dsp::BypassFade fGran, fUnmask, fCrush, fDisp, fVhs, fFollow, fFormant, fBbd, fOtt, fMono, fRes;
     int resMonoNote = -1;   // the note the resonator follows in mono / legato voice modes
 
     // 4x voice bus: rendered oversampled, decimated once for body L/R and sub together

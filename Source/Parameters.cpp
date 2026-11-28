@@ -40,6 +40,7 @@ int pidForId (const juce::String& id) noexcept
 
 Stage stageOf (int pid) noexcept
 {
+    if (pid >= v2_bbd_mode && pid <= v2_bbd_mix) return Stage::Space;
     if (pid >= v2_disp_stages && pid <= v2_disp_pinch) return Stage::Shape;
     if (pid >= v2_rail_sag && pid <= v2_rail_time) return Stage::Voice;
     if (pid >= v2_lpg_mode && pid <= v2_fb_fm) return Stage::Shape;
@@ -102,6 +103,10 @@ const std::vector<int>& modDestinations()
                 v.push_back (i);
         // then V2 Polyphonic Power-Rail Sag & All-Pass Phase Dispersion parameters (append-only)
         for (int i = v2_rail_sag; i <= v2_disp_pinch; ++i)
+            if (kSpecs[i].type == PType::Float)
+                v.push_back (i);
+        // then V2 BBD Analog Chorus parameters (append-only)
+        for (int i = v2_bbd_mode; i <= v2_bbd_mix; ++i)
             if (kSpecs[i].type == PType::Float)
                 v.push_back (i);
         return v;

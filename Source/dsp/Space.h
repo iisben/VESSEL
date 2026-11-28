@@ -416,4 +416,468 @@ private:
     Svf hp;
     Smooth timeS, widthS;
 };
+
+//==============================================================================
+/** Authentic BBD (Bucket Brigade Device) Analog Chorus (MN3009 / MN3007 / Dimension-D inspired):
+    - Clock-rate-modulated BBD delay lines: tau(t) = N_stg / (2 * f_clk(t)) driven by C-infinity rounded
+      analog triangle LFOs in anti-phase stereo (Mode I: 256-stage Juno; Mode II: 512-stage deep + warm
+      band-limited regen; Mode III: 4-tap dual-rate Ensemble).
+    - Exact complementary 64-bit TPT pre-emphasis (+6 dB @ 1.6 kHz) / de-emphasis (-6 dB @ 1.6 kHz)
+      and NE570-style 2:1 / 1:2 true-RMS compander (2-pole ripple-free detector, unity steady-state gain,
+      organic analog transient bloom, zero noise-floor pumping).
+    - Dark 4th-order analog anti-aliasing (pre-BBD) and clock-coupled anti-imaging (post-BBD) Cytomic
+      TPT low-pass filtering (6–10 kHz).
+    - 64-bit double-precision ring buffers with 4th-order-tangent 64-bit Cubic Hermite interpolation and
+      subtle 64-bit ADAA1 BBD charge-well soft saturation.
+    - Reuses VESSEL's Halfband2x polyphase allpass 2x oversampler ONLY on the wet BBD branch when
+      sr < 88.2 kHz (zero nested oversampling, 0 samples added dry latency).
+    - Sub-120 Hz phase-coherent LR4 crossover discipline keeps bass full-weight and mono-anchored
+      even at 100% wet without hollowing out the low end. */
+class BbdChorus
+{
+public:
+    enum Mode { Off = 0, ModeI = 1, ModeII = 2, Ensemble = 3 };
+
+    struct Params
+    {
+        bool  on     = false;
+        int   mode   = ModeI;      // 1=Mode I, 2=Mode II, 3=Ensemble
+        float rateHz = 0.55f;      // 0.05..8.0 Hz clock-mod LFO rate
+        float depth  = 0.55f;      // 0..1 clock-rate modulation depth
+        float toneHz = 8000.0f;    // 6000..10000 Hz analog anti-imaging LPF cutoff
+        float mix    = 0.50f;      // 0..1 wet blend (above sub-120 Hz crossover)
+    };
+
+    void prepare (double sampleRate)
+    {
+        sr = std::max (8000.0, sampleRate);
+        use2x = (sr < 88200.0);
+        bbdSr = use2x ? (2.0 * sr) : sr;
+
+        // Allocate 64-bit ring buffers for >= 35 ms at bbdSr (zero audio-thread allocations)
+        const int maxSamp = (int) std::ceil (0.035 * bbdSr) + 32;
+        for (int c = 0; c < 2; ++c)
+            delayBuf[c].prepare (maxSamp);
+
+        // Fixed 160 Hz 64-bit LR4 crossover -> protects entire sub-120 Hz band phase-coherently
+        constexpr double kXoverHz = 160.0;
+        constexpr double kButterQ = 0.7071067811865476;
+        for (int c = 0; c < 2; ++c)
+        {
+            xSplit1[c].setup (kXoverHz, kButterQ, sr);
+            xSplitLp2[c].setup (kXoverHz, kButterQ, sr);
+            xSplitHp2[c].setup (kXoverHz, kButterQ, sr);
+            wetHp[c].setup (110.0, kButterQ, sr);
+            wetDc[c].prepare (sr, 5.0);
+        }
+
+        // Exact complementary TPT pre-emphasis (+6.02 dB above 1.6 kHz) and de-emphasis (-6.02 dB)
+        const double fcShelf = std::min (1600.0, 0.25 * sr);
+        gPreShelf = std::tan (kPiD * fcShelf / sr);
+        gDeShelf  = gPreShelf / kPreGain;
+        aPreShelf = gPreShelf / (1.0 + gPreShelf);
+        aDeShelf  = gDeShelf  / (1.0 + gDeShelf);
+
+        // NE570-style 2-pole true-RMS compander time constants (sample-rate invariant)
+        envAtt  = std::exp (-1.0 / (0.012 * sr));   // 12 ms attack
+        envRel  = std::exp (-1.0 / (0.065 * sr));   // 65 ms release
+        envRip  = std::exp (-1.0 / (0.018 * sr));   // 18 ms 2nd-pole ripple smoother (>110 dB @ 12 kHz)
+
+        reset();
+    }
+
+    /** Zero added dry-path latency (Halfband2x runs solely inside the delayed wet BBD branch). */
+    float latency() const noexcept { return 0.0f; }
+
+    int activeMode() const noexcept { return lastMode; }
+
+    void reset() noexcept
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            delayBuf[c].clear();
+            os[c].reset();
+            xSplit1[c].reset();
+            xSplitLp2[c].reset();
+            xSplitHp2[c].reset();
+            preLp1[c].reset(); preLp2[c].reset();
+            postLp1[c].reset(); postLp2[c].reset();
+            wetHp[c].reset();
+            wetDc[c].reset();
+            sPreShelf[c] = sDeShelf[c] = 0.0;
+            compE1[c] = compE2[c] = 0.0;
+            expE1[c]  = expE2[c]  = 0.0;
+            adaaX1[c] = adaaF1[c] = 0.0;
+            fbState[c] = 0.0;
+            prevDelayA[c] = 0.0;
+            prevDelayB[c] = 0.0;
+        }
+        phase1 = 0.0;
+        phase2 = 0.25;
+        rateCur = 0.55; depthCur = 0.55; toneCur = 8000.0; mixCur = 0.50;
+        dRate = dDepth = dTone = dMix = 0.0;
+        lastPreTone = -1.0;
+        postSubTick = 0;
+        primed = false;
+        wasActive = false;
+        delayPrimed = false;
+    }
+
+    void process (float* l, float* r, int n, const Params& p, bool isCtrlTick = true, int ctrlSpan = 0) noexcept
+    {
+        if (ctrlSpan <= 0) ctrlSpan = n;
+        const int mode = std::clamp (p.mode, 0, 3);
+        if (! p.on || mode == Off)
+        {
+            if (wasActive)
+            {
+                reset();
+                wasActive = false;
+            }
+            return;
+        }
+
+        wasActive = true;
+        lastMode = mode;
+
+        if (isCtrlTick || ! primed)
+        {
+            const double tRate  = std::clamp ((double) p.rateHz, 0.05, 8.0);
+            const double tDepth = std::clamp ((double) p.depth,  0.0,  1.0);
+            const double tTone  = std::clamp ((double) p.toneHz, 6000.0, std::min (10000.0, 0.42 * sr));
+            const double tMix   = std::clamp ((double) p.mix,    0.0,  1.0);
+
+            if (! primed)
+            {
+                rateCur  = tRate;
+                depthCur = tDepth;
+                toneCur  = tTone;
+                mixCur   = tMix;
+                dRate = dDepth = dTone = dMix = 0.0;
+                primed = true;
+            }
+            else
+            {
+                const double inv = 1.0 / (double) std::max (1, ctrlSpan);
+                dRate  = (tRate  - rateCur)  * inv;
+                dDepth = (tDepth - depthCur) * inv;
+                dTone  = (tTone  - toneCur)  * inv;
+                dMix   = (tMix   - mixCur)   * inv;
+            }
+        }
+
+        const double maxDelay = (double) (delayBuf[0].mask - 8);
+        const double invSr = 1.0 / sr;
+        double dryG = std::cos (0.5 * kPiD * mixCur);
+        double wetG = std::sin (0.5 * kPiD * mixCur);
+        const bool rampMix = (std::abs (dMix) > 1.0e-12);
+
+        for (int i = 0; i < n; ++i)
+        {
+            rateCur  = std::clamp (rateCur  + dRate,  0.05, 8.0);
+            depthCur = std::clamp (depthCur + dDepth, 0.0,  1.0);
+            toneCur  = std::clamp (toneCur  + dTone,  6000.0, std::min (10000.0, 0.42 * sr));
+            mixCur   = std::clamp (mixCur   + dMix,   0.0,  1.0);
+            if (rampMix)
+            {
+                const double angle = 0.5 * kPiD * mixCur;
+                dryG = std::cos (angle);
+                wetG = std::sin (angle);
+            }
+
+            const double inL = (double) l[i];
+            const double inR = (double) r[i];
+
+            // 1. Sub-120 Hz phase-coherent LR4 split at 160 Hz (xLo + xHi == unity-magnitude allpass)
+            xSplit1[0].tick (inL);
+            xSplitLp2[0].tick (xSplit1[0].lp);
+            xSplitHp2[0].tick (xSplit1[0].hp);
+            const double xLoL = xSplitLp2[0].lp;
+            const double xHiL = xSplitHp2[0].hp;
+
+            xSplit1[1].tick (inR);
+            xSplitLp2[1].tick (xSplit1[1].lp);
+            xSplitHp2[1].tick (xSplit1[1].hp);
+            const double xLoR = xSplitLp2[1].lp;
+            const double xHiR = xSplitHp2[1].hp;
+
+            // Keep sub-120 Hz bass phase-coherent (smoothly mono-anchored as mix engages)
+            const double mLo = 0.5 * (xLoL + xLoR);
+            const double sLo = 0.5 * (xLoL - xLoR);
+            const double subWidth = std::max (0.0, 1.0 - 2.0 * mixCur);
+            const double outLoL = mLo + sLo * subWidth;
+            const double outLoR = mLo - sLo * subWidth;
+
+            // 2. Advance BBD clock-modulation LFOs (exact C-infinity rounded analog triangle)
+            phase1 += rateCur * invSr;
+            if (phase1 >= 1.0) phase1 -= std::floor (phase1);
+            const double secRate = std::min (9.5, rateCur * 2.1731);
+            phase2 += secRate * invSr;
+            if (phase2 >= 1.0) phase2 -= std::floor (phase2);
+
+            const double lfo1 = analogTriangle (phase1);
+            double fClkAL = 40000.0, fClkAR = 39200.0;
+            double fClkNomA = 40000.0;
+            double dSecAL = 0.0032, dSecAR = 0.00326;
+            double dSecBL = 0.0053, dSecBR = 0.00547;
+            double fbGain = 0.0;
+
+            if (mode == ModeI)
+            {
+                // Juno-60/106 MN3009 (256 stages, anti-phase clock modulation)
+                const double oct = 0.72 * depthCur;
+                fClkNomA = 40000.0;
+                fClkAL = 40000.0 * std::exp2 ( oct * lfo1);
+                fClkAR = 39200.0 * std::exp2 (-oct * lfo1);
+                dSecAL = 256.0 / (2.0 * fClkAL);
+                dSecAR = 256.0 / (2.0 * fClkAR);
+            }
+            else if (mode == ModeII)
+            {
+                // Deep MN3007 / CE-1 (512 stages, deep clock sweep + subtle dark analog regen)
+                const double oct = 0.65 * depthCur;
+                fClkNomA = 52000.0;
+                fClkAL = 52000.0 * std::exp2 ( oct * lfo1);
+                fClkAR = 50400.0 * std::exp2 (-oct * lfo1);
+                dSecAL = 512.0 / (2.0 * fClkAL);
+                dSecAR = 512.0 / (2.0 * fClkAR);
+                fbGain = 0.14 * depthCur;
+            }
+            else
+            {
+                // Ensemble: 4-tap dual-BBD (MN3009 primary + MN3007 quadrature shimmer, Solina/Dimension-D voicing)
+                const double lfo2 = analogTriangle (phase2);
+                const double octA = 0.65 * depthCur;
+                const double octB = 0.28 * depthCur;
+                fClkNomA = 42000.0;
+                fClkAL = 42000.0 * std::exp2 ( octA * lfo1);
+                fClkAR = 41200.0 * std::exp2 (-octA * lfo1);
+                const double fClkBL = 56000.0 * std::exp2 ( octB * lfo2);
+                const double fClkBR = 54600.0 * std::exp2 (-octB * lfo2);
+                dSecAL = 256.0 / (2.0 * fClkAL);
+                dSecAR = 256.0 / (2.0 * fClkAR);
+                dSecBL = 512.0 / (2.0 * fClkBL);
+                dSecBR = 512.0 / (2.0 * fClkBR);
+            }
+
+            const double dSampA[2] {
+                std::clamp (dSecAL * bbdSr, 4.0, maxDelay),
+                std::clamp (dSecAR * bbdSr, 4.0, maxDelay)
+            };
+            const double dSampB[2] {
+                std::clamp (dSecBL * bbdSr, 4.0, maxDelay),
+                std::clamp (dSecBR * bbdSr, 4.0, maxDelay)
+            };
+            if (! delayPrimed)
+            {
+                for (int c = 0; c < 2; ++c) { prevDelayA[c] = dSampA[c]; prevDelayB[c] = dSampB[c]; }
+                delayPrimed = true;
+            }
+
+            // Update pre-BBD anti-aliasing and clock-coupled post-BBD anti-imaging LPFs every 8 base samples (odd-block invariant)
+            if ((postSubTick++ & 7u) == 0u)
+            {
+                if (std::abs (toneCur - lastPreTone) > 0.05)
+                {
+                    lastPreTone = toneCur;
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        preLp1[c].setup (toneCur, kAnalogQ1, sr);
+                        preLp2[c].setup (toneCur, kAnalogQ2, sr);
+                    }
+                }
+                const double clkRatio[2] { fClkAL / fClkNomA, fClkAR / fClkNomA };
+                for (int c = 0; c < 2; ++c)
+                {
+                    // Slower BBD clock subtly darkens reconstruction LPF just like analog hardware
+                    const double darkMul = std::clamp (0.88 + 0.12 * clkRatio[c], 0.78, 1.06);
+                    const double fcPost = std::clamp (toneCur * darkMul, 4500.0, 0.42 * sr);
+                    postLp1[c].setup (fcPost, kAnalogQ1, sr);
+                    postLp2[c].setup (fcPost, kAnalogQ2, sr);
+                }
+            }
+
+            const double hiIn[2] { xHiL, xHiR };
+            double wetOut[2] { 0.0, 0.0 };
+            const double bbdDrive = 0.45 + 0.35 * depthCur;
+            const double invBbdDrive = 1.0 / bbdDrive;
+
+            for (int c = 0; c < 2; ++c)
+            {
+                // 3. Pre-emphasis (+6.02 dB above 1.6 kHz)
+                const double lpPre = aPreShelf * hiIn[c] + (1.0 - aPreShelf) * sPreShelf[c];
+                sPreShelf[c] = flushDenormal (2.0 * lpPre - sPreShelf[c]);
+                const double preEmph = lpPre + kPreGain * (hiIn[c] - lpPre);
+
+                // 4. NE570 2:1 true-RMS compressor (2-pole ripple-free detector, bounded floor)
+                const double sqPre = preEmph * preEmph;
+                const double cCoef = (sqPre > compE1[c]) ? envAtt : envRel;
+                compE1[c] = flushDenormal (sqPre + cCoef * (compE1[c] - sqPre));
+                compE2[c] = flushDenormal (compE1[c] + envRip * (compE2[c] - compE1[c]));
+                const double rmsPre = std::sqrt (compE2[c] + kCompFloorSq);
+                const double gComp = std::sqrt (kCompRef / rmsPre);
+                const double compSig = preEmph * gComp;
+
+                // 5. Pre-BBD 4th-order dark analog anti-aliasing LPF + Mode II warm regen injection
+                preLp1[c].tick (compSig + fbGain * fbState[c]);
+                preLp2[c].tick (preLp1[c].lp);
+                const double toBbd = preLp2[c].lp;
+
+                // 6. BBD charge-transfer delay core (2x via Halfband2x when sr < 88.2 kHz, 64-bit Hermite + ADAA1)
+                double fromBbd = 0.0;
+                if (use2x)
+                {
+                    double u0, u1;
+                    os[c].upsample (toBbd, u0, u1);
+                    const double dA0 = 0.5 * (prevDelayA[c] + dSampA[c]);
+                    const double dB0 = 0.5 * (prevDelayB[c] + dSampB[c]);
+                    const double v0 = tickBbdCore (c, u0, bbdDrive, invBbdDrive, mode, dA0, dB0);
+                    const double v1 = tickBbdCore (c, u1, bbdDrive, invBbdDrive, mode, dSampA[c], dSampB[c]);
+                    fromBbd = os[c].downsample (v0, v1);
+                }
+                else
+                {
+                    fromBbd = tickBbdCore (c, toBbd, bbdDrive, invBbdDrive, mode, dSampA[c], dSampB[c]);
+                }
+                prevDelayA[c] = dSampA[c];
+                prevDelayB[c] = dSampB[c];
+
+                // 7. Post-BBD 4th-order clock-coupled dark analog anti-imaging LPF
+                postLp1[c].tick (fromBbd);
+                postLp2[c].tick (postLp1[c].lp);
+                const double filtBbd = postLp2[c].lp;
+
+                // Store band-limited feedback for Mode II (soft-guarded against runaway)
+                fbState[c] = flushDenormal (fastTanhD (filtBbd));
+
+                // 8. NE570 1:2 true-RMS expander (complementary steady-state unity + analog transient bloom)
+                const double sqPost = filtBbd * filtBbd;
+                const double eCoef = (sqPost > expE1[c]) ? envAtt : envRel;
+                expE1[c] = flushDenormal (sqPost + eCoef * (expE1[c] - sqPost));
+                expE2[c] = flushDenormal (expE1[c] + envRip * (expE2[c] - expE1[c]));
+                const double rmsPost = std::sqrt (expE2[c] + kExpFloorSq);
+                const double gExp = rmsPost * kInvCompRef;
+                const double expSig = filtBbd * gExp;
+
+                // 9. Exact complementary de-emphasis (-6.02 dB above 1.6 kHz)
+                const double lpDe = aDeShelf * expSig + (1.0 - aDeShelf) * sDeShelf[c];
+                sDeShelf[c] = flushDenormal (2.0 * lpDe - sDeShelf[c]);
+                const double deEmph = lpDe + kInvPreGain * (expSig - lpDe);
+
+                // 10. 64-bit DC block + 110 Hz wet HPF guard (zero sub-120 Hz IM or DC leakage)
+                wetHp[c].tick (wetDc[c].process (deEmph));
+                wetOut[c] = wetHp[c].hp;
+            }
+
+            // Equal-power dry/wet blend on >120 Hz band; phase-coherent sub-120 Hz bass summed at exact unity
+            l[i] = (float) (outLoL + dryG * xHiL + wetG * wetOut[0]);
+            r[i] = (float) (outLoR + dryG * xHiR + wetG * wetOut[1]);
+        }
+    }
+
+private:
+    /** 64-bit double-precision power-of-two circular delay line with 4th-order-tangent 64-bit Cubic Hermite. */
+    struct DelayLineD
+    {
+        std::vector<double> buf;
+        int mask = 0, w = 0;
+
+        void prepare (int maxSamples)
+        {
+            int sz = 1;
+            while (sz < maxSamples + 16) sz <<= 1;
+            buf.assign ((size_t) sz, 0.0);
+            mask = sz - 1;
+            w = 0;
+        }
+        void clear() noexcept { std::fill (buf.begin(), buf.end(), 0.0); w = 0; }
+        void push (double x) noexcept { buf[(size_t) w] = x; w = (w + 1) & mask; }
+
+        /** 64-bit Cubic Hermite interpolation with 4th-order finite-difference tangents (d >= 4.0). */
+        double readHermite64 (double d) const noexcept
+        {
+            const double rp = (double) w - d;
+            const int i1 = (int) std::floor (rp);
+            const double t = rp - (double) i1;
+            const double ym1 = buf[(size_t) ((i1 - 2) & mask)];
+            const double y0  = buf[(size_t) ((i1 - 1) & mask)];
+            const double y1  = buf[(size_t) ( i1      & mask)];
+            const double y2  = buf[(size_t) ((i1 + 1) & mask)];
+            const double y3  = buf[(size_t) ((i1 + 2) & mask)];
+            const double y4  = buf[(size_t) ((i1 + 3) & mask)];
+            constexpr double kInv12 = 1.0 / 12.0;
+            const double m1 = (ym1 - 8.0 * y0 + 8.0 * y2 - y3) * kInv12;
+            const double m2 = (y0  - 8.0 * y1 + 8.0 * y3 - y4) * kInv12;
+            const double c2 = 3.0 * (y2 - y1) - 2.0 * m1 - m2;
+            const double c3 = 2.0 * (y1 - y2) + m1 + m2;
+            return ((c3 * t + c2) * t + m1) * t + y1;
+        }
+    };
+
+    static inline double analogTriangle (double phase01) noexcept
+    {
+        // C-infinity rounded analog triangle LFO (linear constant-detune slopes + smooth RC turnarounds)
+        constexpr double kKappa   = 0.96;
+        constexpr double kInvAsin = 1.0 / 1.2870022175865687;   // 1 / asin(0.96)
+        return std::asin (kKappa * std::sin (kTwoPiD * phase01)) * kInvAsin;
+    }
+
+    inline double tickBbdCore (int c, double xIn, double drive, double invDrive, int mode,
+                               double dA, double dB) noexcept
+    {
+        // Subtle 64-bit ADAA1 BBD MOSFET charge-well soft saturation (exact odd symmetry -> zero DC)
+        const double u = xIn * drive;
+        const double f1 = tanhF1 (u);
+        const double du = u - adaaX1[c];
+        const double sat = (std::abs (du) > 1.0e-5) ? (f1 - adaaF1[c]) / du
+                                                    : fastTanhD (0.5 * (u + adaaX1[c]));
+        adaaX1[c] = u;
+        adaaF1[c] = f1;
+
+        delayBuf[c].push (sat * invDrive);
+
+        const double yA = delayBuf[c].readHermite64 (dA);
+        if (mode == Ensemble)
+        {
+            const double yB = delayBuf[c].readHermite64 (dB);
+            return 0.68 * (yA + yB);
+        }
+        return yA;
+    }
+
+    static constexpr double kPreGain     = 2.0;                         // +6.02 dB pre-emphasis shelf
+    static constexpr double kInvPreGain  = 1.0 / kPreGain;
+    static constexpr double kCompRef     = 0.25;                        // -12 dBFS compander nominal reference
+    static constexpr double kInvCompRef  = 1.0 / kCompRef;
+    static constexpr double kCompFloor   = 0.05;                        // -26 dBFS floor -> max +7 dB quiet lift
+    static constexpr double kCompFloorSq = kCompFloor * kCompFloor;
+    static constexpr double kExpFloorSq  = kCompRef * kCompFloor;       // exact unity product at silence
+    static constexpr double kAnalogQ1    = 0.5411961001461970;          // 4th-order analog anti-imaging stage 1
+    static constexpr double kAnalogQ2    = 1.0800000000000000;          // silky Bessel-Butterworth analog shoulder
+
+    double sr = 48000.0, bbdSr = 96000.0;
+    bool use2x = true;
+
+    DelayLineD delayBuf[2];
+    Halfband2x os[2];
+    Svf xSplit1[2], xSplitLp2[2], xSplitHp2[2];
+    Svf preLp1[2], preLp2[2], postLp1[2], postLp2[2], wetHp[2];
+    DcBlocker wetDc[2];
+
+    double gPreShelf = 0.1, gDeShelf = 0.05, aPreShelf = 0.1, aDeShelf = 0.05;
+    double sPreShelf[2] {}, sDeShelf[2] {};
+    double envAtt = 0.99, envRel = 0.999, envRip = 0.999;
+    double compE1[2] {}, compE2[2] {}, expE1[2] {}, expE2[2] {};
+    double adaaX1[2] {}, adaaF1[2] {};
+    double fbState[2] {};
+    double prevDelayA[2] {}, prevDelayB[2] {};
+
+    double phase1 = 0.0, phase2 = 0.25;
+    double rateCur = 0.55, depthCur = 0.55, toneCur = 8000.0, mixCur = 0.50;
+    double dRate = 0.0, dDepth = 0.0, dTone = 0.0, dMix = 0.0;
+    double lastPreTone = -1.0;
+    uint32_t postSubTick = 0;
+    int lastMode = ModeI;
+    bool primed = false, wasActive = false, delayPrimed = false;
+};
 } // namespace vessel::dsp

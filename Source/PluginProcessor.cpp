@@ -112,6 +112,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     formant.prepare (fs);
     resonator.prepare (fs);
     zaxis.prepare (fs);
+    bbdChorus.prepare (sampleRate);
     blackHole.prepare (fs);
     haas.prepare (fs);
     ott.prepare (fs, kChunk);
@@ -132,7 +133,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     resetExpressionState();
     scopeDecim = 0.0f; peakHoldL = peakHoldR = 0.0f;
     samplePos = 0; ctrlRem = 0; busRem = 0; bodyQuietSamples = 0; voiceOsIdle = true; busVoiceActive = false; busLowestHeld = -1; midiDirty = false;
-    for (auto* f : { &fGran, &fUnmask, &fCrush, &fDisp, &fVhs, &fFollow, &fFormant, &fOtt, &fMono, &fRes }) f->prepare (fs);
+    for (auto* f : { &fGran, &fUnmask, &fCrush, &fDisp, &fVhs, &fFollow, &fFormant, &fBbd, &fOtt, &fMono, &fRes }) f->prepare (fs);
     for (auto& l : lfos) l.reset();
 
     convolution.prepare ({ sampleRate, (juce::uint32) kChunk, 2 });
@@ -149,7 +150,7 @@ void VesselProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
 int VesselProcessor::totalLatency() const
 {
-    return (int) std::lround (ruin.latency() + outStage.latency());
+    return (int) std::lround (ruin.latency() + bbdChorus.latency() + outStage.latency());
 }
 
 void VesselProcessor::setQaDeterministicSeed (uint32_t seed) noexcept
@@ -160,6 +161,7 @@ void VesselProcessor::setQaDeterministicSeed (uint32_t seed) noexcept
     noise.reseed (seed);
     granular.reseed (seed);
     disperser.reset();
+    bbdChorus.reset();
     vhs.reseed (seed);
     resonator.reseed (seed);
     organicBus.reseed (seed);
@@ -204,7 +206,9 @@ void VesselProcessor::snapToCurrentState()
     fGran.snap (pb (gran_on)); fUnmask.snap (pb (unmask_on)); fCrush.snap (pb (crush_on)); fDisp.snap (pc (v2_disp_stages) > 0);
     fVhs.snap (pb (vhs_on));
     disperser.reset();
-    fFollow.snap (pb (envf_on)); fFormant.snap (pb (form_on)); fOtt.snap (pb (ott_on)); fMono.snap (pb (mono_on));
+    fFollow.snap (pb (envf_on)); fFormant.snap (pb (form_on)); fBbd.snap (pc (v2_bbd_mode) > 0);
+    bbdChorus.reset();
+    fOtt.snap (pb (ott_on)); fMono.snap (pb (mono_on));
     fRes.snap (pb (res_on));
     convMixS.snap (pb (conv_on) ? pv (conv_mix) : 0.0f);
     resonator.snapModel (pc (res_model));
@@ -1147,8 +1151,15 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         faded (fFormant, pb (form_on), n, [&] (bool on) { ffp.on = on; formant.process (xL.data(), xR.data(), n, ffp, isBusTick, busSpan); });
     }
 
-    // ── SPACE: (18) Z-axis → (17) convolution → (16) black hole → (19) Haas
+    // ── SPACE: (18) Z-axis → BBD Analog Chorus → (17) convolution → (16) black hole → (19) Haas
     zaxis.process (xL.data(), xR.data(), n, pb (z_on), pvBus (z_depth));
+
+    {
+        const int bbdChoice = pc (v2_bbd_mode);   // 0=Off, 1=Mode I, 2=Mode II, 3=Ensemble
+        BbdChorus::Params bp { true, bbdChoice > 0 ? bbdChoice : bbdChorus.activeMode(),
+                               pvBus (v2_bbd_rate), pvBus (v2_bbd_depth), pvBus (v2_bbd_tone), pvBus (v2_bbd_mix) };
+        faded (fBbd, bbdChoice > 0, n, [&] (bool on) { bp.on = on; bbdChorus.process (xL.data(), xR.data(), n, bp, isBusTick, busSpan); });
+    }
 
     convMixS.set (pb (conv_on) ? pvBus (conv_mix) : 0.0f);
     if (convMixS.target > 0.0f || convMixS.cur > 1.0e-4f)
