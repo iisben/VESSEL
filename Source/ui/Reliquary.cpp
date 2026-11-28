@@ -9,26 +9,25 @@ namespace
 {
    #if JUCE_MAC
     const char* kDisplay = "Didot";                 const char* kDisplayStyle = "Italic";
-    const char* kGrotesk = "Avenir Next Condensed"; const char* kCapsStyle = "Demi Bold"; const char* kValueStyle = "Medium";
+    const char* kGrotesk = "Avenir Next Condensed"; const char* kCapsStyle = "Demi Bold"; const char* kValueStyle = "Demi Bold";
    #elif JUCE_WINDOWS
     const char* kDisplay = "Georgia";               const char* kDisplayStyle = "Italic";
-    const char* kGrotesk = "Bahnschrift";           const char* kCapsStyle = "SemiBold"; const char* kValueStyle = "Regular";
+    const char* kGrotesk = "Bahnschrift";           const char* kCapsStyle = "SemiBold"; const char* kValueStyle = "SemiBold";
    #else
     const char* kDisplay = "DejaVu Serif";          const char* kDisplayStyle = "Italic";
-    const char* kGrotesk = "DejaVu Sans Condensed"; const char* kCapsStyle = "Bold"; const char* kValueStyle = "Book";
+    const char* kGrotesk = "DejaVu Sans Condensed"; const char* kCapsStyle = "Bold"; const char* kValueStyle = "Bold";
    #endif
 }
 
-// Legibility: small captions and values are drawn one point larger than their layout size (the 8-12 pt range is
-// where the condensed grotesk got hard to read), with the caps tracking eased so the wider glyphs keep their width.
-inline float legible (float h) noexcept { return h < 12.5f ? h + 1.0f : h; }
+// Legibility: slightly lift small captions/values with tighter tracking on caps so text is sharper without overlap.
+inline float legible (float h) noexcept { return h < 13.0f ? h + 1.6f : h + 0.5f; }
 
 juce::Font display (float h) { return juce::Font (juce::FontOptions (kDisplay, kDisplayStyle, h)); }
 juce::Font caps (float h, float tracking)
 {
-    return juce::Font (juce::FontOptions (kGrotesk, kCapsStyle, legible (h))).withExtraKerningFactor (h < 12.5f ? tracking * 0.8f : tracking);
+    return juce::Font (juce::FontOptions (kGrotesk, kCapsStyle, legible (h))).withExtraKerningFactor (h < 13.0f ? tracking * 0.72f : tracking * 0.90f);
 }
-juce::Font value (float h) { return juce::Font (juce::FontOptions (kGrotesk, kValueStyle, legible (h))).withExtraKerningFactor (0.02f); }
+juce::Font value (float h) { return juce::Font (juce::FontOptions (kGrotesk, kValueStyle, legible (h))).withExtraKerningFactor (0.015f); }
 float width (const juce::Font& f, const juce::String& s) { return juce::GlyphArrangement::getStringWidth (f, s); }
 } // namespace type
 
@@ -40,7 +39,7 @@ void drawCaps (juce::Graphics& g, const juce::String& text, juce::Rectangle<floa
     g.setFont (font);
     // tracking adds trailing space after the last glyph; shift centred text back by half of it
     if (just.testFlags (juce::Justification::horizontallyCentred)) r = r.translated (font.getExtraKerningFactor() * font.getHeight() * 0.5f, 0.0f);
-    g.drawText (text.toUpperCase(), r, just, false);
+    g.drawFittedText (text.toUpperCase(), r.toNearestInt(), just, 1, 0.84f);
 }
 
 juce::Path invertedTriangle (juce::Point<float> c, float s)
@@ -298,7 +297,7 @@ void ReliquaryLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
     drawCaps (g, s.getName(), bounds.withHeight (capH), 9.5f, hot ? frost : pewter);
     g.setColour (dragging ? violetHi : frost);
     g.setFont (type::value (12.5f));
-    g.drawText (s.getTextFromValue (s.getValue()), bounds.withTop (bounds.getBottom() - valH), juce::Justification::centred, false);
+    g.drawFittedText (s.getTextFromValue (s.getValue()), bounds.withTop (bounds.getBottom() - valH).toNearestInt(), juce::Justification::centred, 1, 0.85f);
 }
 
 //==============================================================================
@@ -417,7 +416,7 @@ void ReliquaryLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, in
 
     g.setColour (s.isMouseButtonDown() ? violet : frost);
     g.setFont (type::value (11.5f));
-    g.drawText (s.getTextFromValue (s.getValue()), bounds.withHeight (valH), juce::Justification::centred, false);
+    g.drawFittedText (s.getTextFromValue (s.getValue()), bounds.withHeight (valH).toNearestInt(), juce::Justification::centred, 1, 0.85f);
     drawCaps (g, shortName, bounds.withTop (bounds.getBottom() - capH), 9.5f, hot ? frost : pewter);
 }
 

@@ -23,8 +23,8 @@ namespace ink
     const juce::Colour basin   { 0xff0c0e13 };   // glass panels (used with alpha)
     const juce::Colour seam    { 0xff1b1f28 };   // structural hairlines
     const juce::Colour seamHi  { 0xff343b49 };
-    const juce::Colour pewter  { 0xffa4adc0 };   // secondary text (lifted for legibility: 7.9:1 on the ground)
-    const juce::Colour frost   { 0xffe9eef6 };   // primary text, values
+    const juce::Colour pewter  { 0xffbcc5d8 };   // secondary text (sharpened contrast on dark glass)
+    const juce::Colour frost   { 0xfff3f7fc };   // primary text, values
     const juce::Colour violet  { 0xffcc8eff };   // active / value (brightened electric neon purple)
     const juce::Colour violetHi{ 0xffe6c6ff };   // specular lavender-violet highlight
     const juce::Colour chlorine{ 0xff4fe3cf };   // modulation
@@ -66,7 +66,7 @@ public:
     void drawButtonText (juce::Graphics&, juce::TextButton&, bool highlighted, bool down) override;
 
     void drawComboBox (juce::Graphics&, int w, int h, bool down, int bx, int by, int bw, int bh, juce::ComboBox&) override;
-    juce::Font getComboBoxFont (juce::ComboBox&) override { return type::value (13.0f); }
+    juce::Font getComboBoxFont (juce::ComboBox&) override { return type::value (13.5f); }
     void positionComboBoxText (juce::ComboBox&, juce::Label&) override;
 
     void drawPopupMenuBackground (juce::Graphics&, int w, int h) override;
@@ -74,12 +74,12 @@ public:
                             bool isTicked, bool hasSubMenu, const juce::String& text, const juce::String& shortcut,
                             const juce::Drawable* icon, const juce::Colour* textColour) override;
     void drawPopupMenuSectionHeader (juce::Graphics&, const juce::Rectangle<int>&, const juce::String&) override;
-    juce::Font getPopupMenuFont() override { return type::value (14.0f); }
+    juce::Font getPopupMenuFont() override { return type::value (14.5f); }
     int getPopupMenuBorderSize() override { return 1; }
 
     void fillTextEditorBackground (juce::Graphics&, int w, int h, juce::TextEditor&) override;
     void drawTextEditorOutline (juce::Graphics&, int w, int h, juce::TextEditor&) override;
-    juce::Font getLabelFont (juce::Label&) override { return type::value (13.0f); }
+    juce::Font getLabelFont (juce::Label&) override { return type::value (13.5f); }
     void drawTooltip (juce::Graphics&, const juce::String&, int w, int h) override;
     /** The window-size grip: a sigil of three diamonds stepping into a bracketed corner. */
     void drawCornerResizer (juce::Graphics&, int w, int h, bool isMouseOver, bool isMouseDragging) override;

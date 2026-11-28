@@ -43,7 +43,7 @@ VesselEditor::VesselEditor (VesselProcessor& p)
     setResizable (true, true);
     setResizeLimits (kWidth * 3 / 4, kHeight * 3 / 4, kWidth * 3 / 2, kHeight * 3 / 2);
     if (auto* c = getConstrainer()) c->setFixedAspectRatio ((double) kWidth / (double) kHeight);
-    setSize (kWidth, kHeight);
+    setSize (kDefaultWidth, kDefaultHeight);
 
     startTimerHz (30);
 }

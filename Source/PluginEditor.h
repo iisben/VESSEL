@@ -22,6 +22,7 @@ public:
     void resized() override;
 
     static constexpr int kWidth = 1240, kHeight = 780;
+    static constexpr int kDefaultWidth = 1388, kDefaultHeight = 873;
     void showStage (int);
     void showBrowser (bool);
     void selectModPage (int page) { mod->select (page); }
