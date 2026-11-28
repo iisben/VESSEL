@@ -1,5 +1,6 @@
 #include "Parameters.h"
 #include "dsp/Tables.h"
+#include <bit>
 
 namespace vessel
 {
@@ -225,12 +226,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
             if (s.centre > 0.0f && s.centre > s.min && s.centre < s.max)
                 range.setSkewForCentre (s.centre);
 
+            // Canonicalize default to an exact IEEE-754 fixed point of convertFrom0to1(convertTo0to1(x))
+            // so AU hosts (auval -strict) read back the exact default bit-for-bit after a set/get round-trip.
+            float canonicalDef = s.def;
+            for (int iter = 0; iter < 4; ++iter)
+            {
+                const float norm = range.convertTo0to1 (canonicalDef);
+                const float next = range.convertFrom0to1 (norm);
+                if (std::bit_cast<uint32_t> (range.convertTo0to1 (next)) == std::bit_cast<uint32_t> (norm))
+                {
+                    canonicalDef = next;
+                    break;
+                }
+                canonicalDef = next;
+            }
+
             const int pid = i;
             auto attrs = juce::AudioParameterFloatAttributes()
                              .withStringFromValueFunction ([pid] (float v, int n) { return formatValue (pid, v, n); })
                              .withValueFromStringFunction ([pid] (const juce::String& t) { return parseValue (pid, t); });
 
-            layout.add (std::make_unique<juce::AudioParameterFloat> (id, s.name, range, s.def, attrs));
+            layout.add (std::make_unique<juce::AudioParameterFloat> (id, s.name, range, canonicalDef, attrs));
         }
     }
     return layout;

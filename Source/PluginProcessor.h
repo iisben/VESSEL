@@ -325,13 +325,16 @@ private:
     double bpm = 120.0, ppqBlock = 0.0;
     bool playing = false;
 
-    // convolution state (non-RT: message timer + prepareToPlay; serialized by irLock, never touched by audio)
+    // convolution state (non-RT: message timer + prepareToPlay; serialized by irLock,
+    // and coordinated with audio-thread convolution.process() via lock-free Dekker atomics)
     int loadedIr = -1;
     float loadedIrSize = -1.0f;
     double loadedIrRate = 0.0;
     juce::File userIrFile;
     bool userIrDirty = false;
     juce::CriticalSection irLock;
+    std::atomic<bool> convUpdating { false };
+    std::atomic<bool> convAudioActive { false };
 
     std::atomic<int> currentPreset { 0 };
     std::shared_ptr<std::atomic<bool>> aliveFlag = std::make_shared<std::atomic<bool>> (true);

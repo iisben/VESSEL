@@ -354,12 +354,14 @@ public:
 
     void prepare (float sampleRate, int maxBlock)
     {
+        baseSr = sampleRate;
         osr = 4.0f * sampleRate;
         os.prepare (maxBlock);
         const int q = (int) std::llround (((double) os.getLatencyInSamples() + 0.25) * 4.0);
         pad4x = (4 - (q & 3)) & 3;
         pre[0].reset(); pre[1].reset();
         post[0].reset(); post[1].reset();
+        for (int c = 0; c < 2; ++c) { outDc[c].setup (10.0, 0.70710678, (double) baseSr); outDc[c].reset(); }
         gainR.reset(); ceilR.reset(); amtR.reset();
         clipped = 0;
         excFade.prepare (osr); clipFade.prepare (osr);
@@ -388,6 +390,7 @@ public:
         tp.reset();
         pre[0].reset(); pre[1].reset();
         post[0].reset(); post[1].reset();
+        outDc[0].reset(); outDc[1].reset();
         resetAdaa();
     }
 
@@ -491,6 +494,13 @@ public:
         }
         os.processDown (l, r, n);
 
+        // Post-clipper 64-bit 10 Hz Butterworth DC hygiene (pre-TruePeakCeiling so brickwall ceiling stays exact)
+        for (int i = 0; i < n; ++i)
+        {
+            l[i] = outDc[0].highpass (l[i]);
+            r[i] = outDc[1].highpass (r[i]);
+        }
+
         // inter-sample peaks left by the decimation; then the sample clamp, which is now only a backstop
         if (tpActive)
             tp.process (l, r, n, p.clipOn && truePeak ? ceilR.cur : 0.0f);
@@ -564,9 +574,9 @@ private:
         padIdx = 0;
     }
 
-    float osr = 192000.0f;
+    float baseSr = 48000.0f, osr = 192000.0f;
     LinearPhase4xOs os;
-    Svf pre[2], post[2];
+    Svf pre[2], post[2], outDc[2];
     BypassFade excFade, clipFade;
     Ramp gainR, ceilR, amtR;
     double excX1[2] {}, excF1Prev[2] {}, clipX1[2] {}, clipX2[2] {};

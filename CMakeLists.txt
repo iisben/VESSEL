@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(VESSEL VERSION 2.0.2 LANGUAGES C CXX)
+project(VESSEL VERSION 2.0.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,6 +28,7 @@ endif()
 
 juce_add_plugin(Vessel
   COMPANY_NAME                "iisben"
+  COMPANY_WEBSITE             "https://github.com/iisben/VESSEL"
   BUNDLE_ID                   "audio.vessel.vessel"
   PLUGIN_MANUFACTURER_CODE    Vsla
   PLUGIN_CODE                 Vssl

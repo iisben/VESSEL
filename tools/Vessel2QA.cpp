@@ -263,6 +263,8 @@ struct AliasMetrics
 // 4-term Blackman-Harris windowed DC estimator (exact gain 1.0 at 0 Hz, <-92 dB sidelobes so periodic tones don't leak into DC)
 double windowedDcDbfs (const std::vector<float>& x, size_t start, size_t len)
 {
+    if (start >= x.size() || len == 0) return -300.0;
+    len = std::min (len, x.size() - start);
     double num = 0.0, den = 0.0;
     const double inv = 1.0 / (double) std::max<size_t> (1, len - 1);
     for (size_t i = 0; i < len; ++i)
@@ -1166,9 +1168,9 @@ GateResult runGate4()
         // 1) Multi-rate extreme stress & musical self-oscillation across 44.1, 48, 96, 192 kHz
         for (double rSr : { 44100.0, 48000.0, 96000.0, 192000.0 })
         {
-            const int nTot = (int) (0.70 * rSr);
-            const size_t dcStart = (size_t) (0.25 * rSr);
-            const size_t dcLen   = (size_t) (0.45 * rSr);
+            const int nTot = (int) std::lround (0.70 * rSr);
+            const size_t dcStart = (size_t) std::lround (0.25 * rSr);
+            const size_t dcLen   = (size_t) std::min<long> (std::lround (0.45 * rSr), std::max<long> (0, (long) nTot - (long) dcStart));
             for (float fbSign : { -1.0f, 1.0f })
             {
                 auto p = makeProcessor (rSr, 512);

@@ -3,6 +3,7 @@
 #include "PluginEditor.h"
 #endif
 #include "Presets.h"
+#include <thread>
 
 using namespace vessel;
 using namespace vessel::dsp;
@@ -1165,9 +1166,17 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     if (convMixS.target > 0.0f || convMixS.cur > 1.0e-4f)
     {
         std::copy_n (xL.data(), n, wetL.data()); std::copy_n (xR.data(), n, wetR.data());
-        float* ch[2] { wetL.data(), wetR.data() };
-        juce::dsp::AudioBlock<float> blk (ch, 2, (size_t) n);
-        convolution.process (juce::dsp::ProcessContextReplacing<float> (blk));
+        if (! convUpdating.load (std::memory_order_acquire))
+        {
+            convAudioActive.store (true, std::memory_order_seq_cst);
+            if (! convUpdating.load (std::memory_order_seq_cst))
+            {
+                float* ch[2] { wetL.data(), wetR.data() };
+                juce::dsp::AudioBlock<float> blk (ch, 2, (size_t) n);
+                convolution.process (juce::dsp::ProcessContextReplacing<float> (blk));
+            }
+            convAudioActive.store (false, std::memory_order_release);
+        }
         for (int i = 0; i < n; ++i)
         {
             const float m = convMixS.next();
@@ -1271,20 +1280,38 @@ void VesselProcessor::refreshImpulseResponse (bool forceReload)
     const float size = param (conv_size)->convertFrom0to1 (param (conv_size)->getValue());
     const double rate = std::max (8000.0, srAtomic.load (std::memory_order_acquire));
 
+    auto runConvExclusive = [this] (auto&& fn)
+    {
+        // Serialize loadImpulseResponse() against audio-thread convolution.process() using lock-free
+        // Dekker handshaking (avoids JUCE ConvolutionEngineQueue::postPendingCommand() data race
+        // without blocking or locking on the real-time audio thread).
+        convUpdating.store (true, std::memory_order_seq_cst);
+        while (convAudioActive.load (std::memory_order_seq_cst))
+            std::this_thread::yield();
+        fn();
+        convUpdating.store (false, std::memory_order_release);
+    };
+
     if (type == 5)
     {
         if (! userIrDirty && loadedIr == 5 && std::abs (rate - loadedIrRate) <= 0.5) return;
         const juce::File file = userIrFile;
         userIrDirty = false;
         if (file.existsAsFile())
-            convolution.loadImpulseResponse (file, juce::dsp::Convolution::Stereo::yes,
-                                             juce::dsp::Convolution::Trim::yes, 0, juce::dsp::Convolution::Normalise::yes);
+        {
+            runConvExclusive ([&] {
+                convolution.loadImpulseResponse (file, juce::dsp::Convolution::Stereo::yes,
+                                                 juce::dsp::Convolution::Trim::yes, 0, juce::dsp::Convolution::Normalise::yes);
+            });
+        }
         else
         {
             auto silent = ImpulseFactory::make (0, 1.0f, rate);
             silent.clear();
-            convolution.loadImpulseResponse (std::move (silent), rate, juce::dsp::Convolution::Stereo::yes,
-                                             juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::no);
+            runConvExclusive ([&] {
+                convolution.loadImpulseResponse (std::move (silent), rate, juce::dsp::Convolution::Stereo::yes,
+                                                 juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::no);
+            });
         }
         loadedIr = 5;
         loadedIrRate = rate;
@@ -1294,8 +1321,10 @@ void VesselProcessor::refreshImpulseResponse (bool forceReload)
     if (type != loadedIr || std::abs (size - loadedIrSize) > 0.01f || std::abs (rate - loadedIrRate) > 0.5)
     {
         auto ir = ImpulseFactory::make (type, size, rate);
-        convolution.loadImpulseResponse (std::move (ir), rate, juce::dsp::Convolution::Stereo::yes,
-                                         juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::yes);
+        runConvExclusive ([&] {
+            convolution.loadImpulseResponse (std::move (ir), rate, juce::dsp::Convolution::Stereo::yes,
+                                             juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::yes);
+        });
         loadedIr = type; loadedIrSize = size; loadedIrRate = rate;
     }
 }
@@ -1616,6 +1645,18 @@ void VesselProcessor::setStateInformation (const void* data, int size)
         midiLearn.fromValueTree (ml, false);
 
     apvts.replaceState (state);
+    // AudioParameterBool::setValue() retains arbitrary un-snapped floats (e.g. 0.26 from host automation
+    // or pluginval fuzzing) while APVTS caches the snapped denormalised value (0.0), causing replaceState()
+    // to skip resetting the raw float when the logical bool didn't flip. Re-snap discrete params explicitly.
+    for (int i = 0; i < NUM_PARAMS; ++i)
+    {
+        if (spec (i).type == PType::Bool || spec (i).type == PType::Choice)
+        {
+            const float snapped = params[(size_t) i]->convertTo0to1 (rawParams[(size_t) i]->load (std::memory_order_relaxed));
+            if (std::abs (params[(size_t) i]->getValue() - snapped) > 1.0e-6f)
+                params[(size_t) i]->setValueNotifyingHost (snapped);
+        }
+    }
     tables.loadNow (pc (wt_table));
     refreshImpulseResponse (false);
     const int slot = activeAB.load (std::memory_order_acquire);

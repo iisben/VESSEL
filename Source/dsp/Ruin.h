@@ -656,7 +656,11 @@ public:
     {
         sr = sampleRate;
         acc = 0.0f; held[0] = held[1] = 0.0f;
-        for (int c = 0; c < 2; ++c) { preA[c].reset(); preB[c].reset(); post[c].reset(); }
+        for (int c = 0; c < 2; ++c)
+        {
+            preA[c].reset(); preB[c].reset(); post[c].reset();
+            dcHp[c].setup (10.0, 0.70710678, (double) sr); dcHp[c].reset();
+        }
         mixR.reset(); preR.reset();
     }
 
@@ -693,6 +697,7 @@ public:
                 if (take) held[c] = std::round (pre * levels) / levels;
                 float y = held[c];
                 if (p.post > 0.0f) y = post[c].lowpass (y);
+                y = dcHp[c].highpass (y);
                 *io[c] = x + mix * (y - x);
             }
         }
@@ -700,7 +705,7 @@ public:
 
 private:
     float sr = 48000.0f, acc = 0.0f, held[2] {};
-    Svf preA[2], preB[2], post[2];
+    Svf preA[2], preB[2], post[2], dcHp[2];
     Ramp mixR, preR;
 };
 

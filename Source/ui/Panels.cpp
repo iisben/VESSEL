@@ -864,7 +864,7 @@ void Header::paint (juce::Graphics& g)
        #ifdef JucePlugin_VersionString
         const juce::String verText = "v" + juce::String (JucePlugin_VersionString);
        #else
-        const juce::String verText = "v2.0.2";
+        const juce::String verText = "v2.0.3";
        #endif
         const float byW = type::width (type::display (14.0f), "by iisben");
         const auto vf = type::value (10.5f);

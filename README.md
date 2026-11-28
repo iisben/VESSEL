@@ -4,8 +4,10 @@
 
 [**Download Latest Release (macOS Universal · Windows x64 · Linux x86_64)**](https://github.com/iisben/VESSEL/releases/latest) · [**All Releases**](https://github.com/iisben/VESSEL/releases)
 
-## What's New in v2.0.2
+## What's New in v2.0.3
 
+- **Hardened Host Compliance & Real-Time Reliability:** Passes `pluginval` strictness level 10 on both VST3 & AU (fixed discrete/bool state restoration syncing on `setStateInformation`), `auval -strict` with zero warnings (canonicalized IEEE-754 float default round-trips), Steinberg VST 3.8.1 `validator` (`537/537`), and zero-violation LLVM RTSan / ASan / UBSan / TSan verification (lock-free Dekker serialization for live convolution IR updates).
+- **DSP Polish Across All 116 Presets:** Instant idle model switching in the physical-model `Resonator` so the very first strike after switching presets rings at full strength, plus 64-bit 10 Hz Butterworth DC-hygiene filtering after `BitCrusher` and post-clipper `OutputStage` (pre-true-peak ceiling) for clean sub-`-80 dBFS` DC across every factory preset.
 - **Boutique Analog Realism DSP Suite:** Nonlinear coupled 64-bit ZDF ladder & dual-diode Sallen-Key filters, stateful magnetic hysteresis & iron transformer saturation (`RuinCore`), two-stage CdS vactrol low-pass gate & audio-rate feedback, polyphonic power-rail sag & 4–8 stage all-pass phase dispersion, and a clock-rate-modulated BBD analog chorus (Modes I/II/Ensemble) with NE570 compander dynamics, dark 6–10 kHz anti-imaging filtering, and sub-120 Hz phase-coherent bass preservation.
 - **Core DSP Engine Upgrade:** Band-limited 3-mip/octave Hermite wavetables, through-zero FM, 2nd-order anti-aliased saturation (ADAA2), linear-phase oversampling with host PDC, click-free modulation and envelopes, and 16-voice SIMD optimization.
 - **More Sounds & Control:** 20 new flagship presets (116 total), MPE & polyphonic aftertouch support, MIDI Learn, A/B compare, and Undo/Redo.
@@ -57,7 +59,7 @@ Download the latest release for your OS from [**GitHub Releases**](https://githu
 
 ### macOS (Universal: Apple Silicon + Intel)
 
-Download `VESSEL-2.0.2-macOS-Universal.zip` (or the individual `macOS-VST3` / `macOS-AU` zips), unzip, and copy:
+Download `VESSEL-2.0.3-macOS-Universal.zip` (or the individual `macOS-VST3` / `macOS-AU` zips), unzip, and copy:
 
 - `VESSEL.vst3` → `~/Library/Audio/Plug-Ins/VST3/`
 - `VESSEL.component` → `~/Library/Audio/Plug-Ins/Components/`
@@ -70,7 +72,7 @@ Download `VESSEL-2.0.2-macOS-Universal.zip` (or the individual `macOS-VST3` / `m
 
 ### Windows (64-bit)
 
-Download `VESSEL-2.0.2-Windows-x64.zip`, unzip, and copy the **entire** `VESSEL.vst3` folder into:
+Download `VESSEL-2.0.3-Windows-x64.zip`, unzip, and copy the **entire** `VESSEL.vst3` folder into:
 
 ```text
 C:\Program Files\Common Files\VST3\
@@ -80,12 +82,12 @@ Keep the folder intact (the 379 wavetables live inside it). A standalone `Standa
 
 ### Linux (x86_64)
 
-Download `VESSEL-2.0.2-Linux-x86_64.tar.gz`, extract, and copy the **entire** `VESSEL.vst3` folder into:
+Download `VESSEL-2.0.3-Linux-x86_64.tar.gz`, extract, and copy the **entire** `VESSEL.vst3` folder into:
 
 ```bash
-tar -xzf VESSEL-2.0.2-Linux-x86_64.tar.gz
+tar -xzf VESSEL-2.0.3-Linux-x86_64.tar.gz
 mkdir -p ~/.vst3
-cp -r VESSEL-2.0.2-Linux-x86_64/VESSEL.vst3 ~/.vst3/
+cp -r VESSEL-2.0.3-Linux-x86_64/VESSEL.vst3 ~/.vst3/
 ```
 
 Keep the folder intact so the bundled wavetables load cleanly, then rescan VST3 plug-ins in your DAW (REAPER, Bitwig, Ardour, Renoise, etc.). A standalone binary is in `Standalone/VESSEL`.

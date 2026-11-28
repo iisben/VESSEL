@@ -173,6 +173,27 @@ public:
         mixR.to (p.mix, n);
         inputR.to (2.0f * p.input, n);
 
+        // If the model changed while no resonator slot is currently ringing (e.g. a fresh preset switch
+        // immediately followed by a note-on), adopt the new model before updateSlot() so the first strike
+        // is not silenced by a 5 ms fade-and-clear. Live switches while ringing still crossfade smoothly.
+        if (p.model != model)
+        {
+            bool anyRinging = false;
+            for (const auto& s : slots)
+                if (s.active && (s.env > 1.0e-5f || s.peak > 1.0e-5f)) { anyRinging = true; break; }
+            if (! anyRinging)
+            {
+                model = p.model;
+                switchGain = 1.0f;
+                for (auto& s : slots)
+                {
+                    const bool keepStrike = s.wantStrike;
+                    clearState (s);
+                    s.wantStrike = keepStrike;
+                }
+            }
+        }
+
         const bool waveguide = model == String || model == Tube;
         for (auto& s : slots) if (s.active) updateSlot (s, p, n);
 
