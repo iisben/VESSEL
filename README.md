@@ -1,10 +1,15 @@
 # VESSEL
 
-## What's New in v2.0
+[![Latest Release](https://img.shields.io/github/v/release/iisben/VESSEL?color=8b5cf6&label=Latest%20Release)](https://github.com/iisben/VESSEL/releases/latest)
 
-- **DSP Engine Upgrade:** Band-limited 3-mip/octave Hermite wavetables, through-zero FM, 64-bit zero-delay-feedback filters, 2nd-order anti-aliased saturation (ADAA2), linear-phase oversampling with host PDC, click-free modulation and envelopes, and 16-voice SIMD optimization.
+[**Download Latest Release (macOS Universal · Windows x64 · Linux x86_64)**](https://github.com/iisben/VESSEL/releases/latest) · [**All Releases**](https://github.com/iisben/VESSEL/releases)
+
+## What's New in v2.0.1
+
+- **Boutique Analog Realism DSP Suite:** Nonlinear coupled 64-bit ZDF ladder & dual-diode Sallen-Key filters, stateful magnetic hysteresis & iron transformer saturation (`RuinCore`), two-stage CdS vactrol low-pass gate & audio-rate feedback, polyphonic power-rail sag & 4–8 stage all-pass phase dispersion, and a clock-rate-modulated BBD analog chorus (Modes I/II/Ensemble) with NE570 compander dynamics, dark 6–10 kHz anti-imaging filtering, and sub-120 Hz phase-coherent bass preservation.
+- **Core DSP Engine Upgrade:** Band-limited 3-mip/octave Hermite wavetables, through-zero FM, 2nd-order anti-aliased saturation (ADAA2), linear-phase oversampling with host PDC, click-free modulation and envelopes, and 16-voice SIMD optimization.
 - **More Sounds & Control:** 20 new flagship presets (116 total), MPE & polyphonic aftertouch support, MIDI Learn, A/B compare, and Undo/Redo.
-- **Reactive Backdrop & 3D Knobs:** Transparent obsidian ferrofluid + crystalline plexus OpenGL backdrop that reacts to key presses, sustained holds, and polyphonic touch, paired with subtle 3D sculpted knobs and brighter neon-purple accents.
+- **Reactive Backdrop & 3D Knobs:** Transparent obsidian ferrofluid + crystalline plexus OpenGL backdrop that reacts to key presses, sustained holds, and polyphonic touch, paired with subtle 3D sculpted knobs, header version badge, and brighter neon-purple accents.
 - **Linux Support:** Native Linux x86_64 VST3 and Standalone builds added alongside macOS Universal and Windows x64.
 
 ---
@@ -48,11 +53,11 @@ You start with a phase-locked dual sub, wavetables, FM, drone, noise, and granul
 
 ## Installation
 
-Download the latest release for your OS from [**GitHub Releases**](https://github.com/iisben/VESSEL/releases/latest).
+Download the latest release for your OS from [**GitHub Releases**](https://github.com/iisben/VESSEL/releases/latest) (or browse [all releases](https://github.com/iisben/VESSEL/releases)).
 
 ### macOS (Universal: Apple Silicon + Intel)
 
-Download `VESSEL-2.0.0-macOS-Universal.zip` (or the individual `macOS-VST3` / `macOS-AU` zips), unzip, and copy:
+Download `VESSEL-2.0.1-macOS-Universal.zip` (or the individual `macOS-VST3` / `macOS-AU` zips), unzip, and copy:
 
 - `VESSEL.vst3` → `~/Library/Audio/Plug-Ins/VST3/`
 - `VESSEL.component` → `~/Library/Audio/Plug-Ins/Components/`
@@ -65,7 +70,7 @@ Download `VESSEL-2.0.0-macOS-Universal.zip` (or the individual `macOS-VST3` / `m
 
 ### Windows (64-bit)
 
-Download `VESSEL-2.0.0-Windows-x64.zip`, unzip, and copy the **entire** `VESSEL.vst3` folder into:
+Download `VESSEL-2.0.1-Windows-x64.zip`, unzip, and copy the **entire** `VESSEL.vst3` folder into:
 
 ```text
 C:\Program Files\Common Files\VST3\
@@ -75,12 +80,12 @@ Keep the folder intact (the 379 wavetables live inside it). A standalone `Standa
 
 ### Linux (x86_64)
 
-Download `VESSEL-2.0.0-Linux-x86_64.tar.gz`, extract, and copy the **entire** `VESSEL.vst3` folder into:
+Download `VESSEL-2.0.1-Linux-x86_64.tar.gz`, extract, and copy the **entire** `VESSEL.vst3` folder into:
 
 ```bash
-tar -xzf VESSEL-2.0.0-Linux-x86_64.tar.gz
+tar -xzf VESSEL-2.0.1-Linux-x86_64.tar.gz
 mkdir -p ~/.vst3
-cp -r VESSEL-2.0.0-Linux-x86_64/VESSEL.vst3 ~/.vst3/
+cp -r VESSEL-2.0.1-Linux-x86_64/VESSEL.vst3 ~/.vst3/
 ```
 
 Keep the folder intact so the bundled wavetables load cleanly, then rescan VST3 plug-ins in your DAW (REAPER, Bitwig, Ardour, Renoise, etc.). A standalone binary is in `Standalone/VESSEL`.

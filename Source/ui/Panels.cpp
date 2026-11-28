@@ -857,7 +857,27 @@ void Header::paint (juce::Graphics& g)
     drawCaps (g, "sub  /  texture  /  ruin", { 162.0f, h * 0.5f - 9.0f, 200.0f, 14.0f }, 9.0f, pewter, juce::Justification::centredLeft, 0.28f);
     g.setColour (violet.withAlpha (0.85f));
     g.setFont (type::display (14.0f));
-    g.drawText ("by iisben", juce::Rectangle<float> (162.0f, h * 0.5f + 3.0f, 200.0f, 16.0f), juce::Justification::centredLeft, false);
+    g.drawText ("by iisben", juce::Rectangle<float> (162.0f, h * 0.5f + 3.0f, 120.0f, 16.0f), juce::Justification::centredLeft, false);
+
+    // version badge (auto-synced with CMakeLists.txt via JucePlugin_VersionString)
+    {
+       #ifdef JucePlugin_VersionString
+        const juce::String verText = "v" + juce::String (JucePlugin_VersionString);
+       #else
+        const juce::String verText = "v2.0.1";
+       #endif
+        const float byW = type::width (type::display (14.0f), "by iisben");
+        const auto vf = type::value (10.5f);
+        const float badgeW = type::width (vf, verText) + 12.0f;
+        const juce::Rectangle<float> badge (162.0f + byW + 10.0f, h * 0.5f + 3.5f, badgeW, 15.0f);
+        g.setColour (violet.withAlpha (0.14f));
+        g.fillRoundedRectangle (badge, 3.5f);
+        g.setColour (violet.withAlpha (0.48f));
+        g.drawRoundedRectangle (badge, 3.5f, 1.0f);
+        g.setColour (frost.withAlpha (0.92f));
+        g.setFont (vf);
+        g.drawText (verText, badge, juce::Justification::centred, false);
+    }
 
     // preset
     const auto a = presetArea().toFloat();
