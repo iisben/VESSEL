@@ -5,7 +5,7 @@
 namespace vessel::dsp
 {
 //==============================================================================
-/** V2 Dark Analog Organic Bus (Sequel Signature):
+/** Analog Organic Bus:
     1. Subtle tape/chassis micro-instability (1/f pink drift modulating a Hermite delay line above 120 Hz,
        leaving sub-120 Hz phase-locked and mono-anchored).
     2. Voice-gated analog thermal floor (-72..-48 dBFS band-limited pink thermal bed that smoothly fades
@@ -174,7 +174,7 @@ private:
 };
 
 //==============================================================================
-/** V2 Additive Procedural Texture & Sub-Harmonic Layer (100% procedural, zero external samples).
+/** Additive procedural texture & sub-harmonic layer.
     Three dark-IDM character modes summed cleanly at the voice/bus boundary:
       0: Tape Air      — mechanical capstan flutter + filtered stereo pink air bed (voice-gated).
       1: Sub Weight    — phase-coherent mono-anchored sub-harmonic octave weight (-1/-2 oct, voice-gated).

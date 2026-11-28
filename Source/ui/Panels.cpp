@@ -243,7 +243,7 @@ std::unique_ptr<StagePage> buildStage (int index, VesselProcessor& p, Registry& 
 
     switch (index)
     {
-        case 0:   // ── I · SOURCE
+        case 0:   // I · SOURCE
         {
             auto& sub = col ("Sub", "01", sub_on, 1);
             sub.row ({ &sub.selector (sub1_oct, "Sub 1 Oct"), &sub.selector (sub2_oct, "Sub 2 Oct") }, S);
@@ -350,7 +350,7 @@ std::unique_ptr<StagePage> buildStage (int index, VesselProcessor& p, Registry& 
             break;
         }
 
-        case 1:   // ── II · RUIN
+        case 1:   // II · RUIN
         {
             auto& tl = col ("Tilt", "15", -1, 1);
             tl.row ({ &tl.halo (pre_tilt, "Pre"), &tl.halo (pre_pivot, "Pivot") }, H);
@@ -465,7 +465,7 @@ std::unique_ptr<StagePage> buildStage (int index, VesselProcessor& p, Registry& 
             break;
         }
 
-        case 2:   // ── III · SHAPE
+        case 2:   // III · SHAPE
         {
             auto& ld = col ("Ladders", "11", flt_on, 1.9f);
             ld.row ({ &ld.selector (flt_route, "Routing") }, S);
@@ -575,7 +575,7 @@ std::unique_ptr<StagePage> buildStage (int index, VesselProcessor& p, Registry& 
             break;
         }
 
-        case 3:   // ── IV · SPACE
+        case 3:   // IV · SPACE
         {
             auto& z = col ("Z-Depth", "18", z_on, 1);
             z.row ({ &z.halo (z_depth, "Depth") }, H);
@@ -658,7 +658,7 @@ std::unique_ptr<StagePage> buildStage (int index, VesselProcessor& p, Registry& 
             break;
         }
 
-        case 4:   // ── V · PRESSURE
+        case 4:   // V · PRESSURE
         default:
         {
             auto& mb = col ("Multiband", "21", ott_on, 3);

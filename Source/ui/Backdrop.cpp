@@ -193,7 +193,7 @@ void main()
     vec2 uv = vUv;
     float aspect = res.x / max (res.y, 1.0);
 
-    // ── 1. Serene Reliquary dark water ground (quiet & effortless legibility at rest)
+    // 1. Serene Reliquary dark water ground (quiet & effortless legibility at rest)
     vec2 bgP = uv * vec2 (aspect, 1.0) * 1.55;
     float bgT = time * 0.025;
     vec2 bgQ = vec2 (fbm3 (bgP + vec2 (0.0, bgT)), fbm3 (bgP + vec2 (4.8, 1.7) - bgT));
@@ -211,7 +211,7 @@ void main()
     baseCol += deepViolet * pow (bgF, 3.2) * (0.14 + 0.12 * energy);
     baseCol += chlorine * pow (clamp (bgQ.y, 0.0, 1.0), 5.2) * 0.045;
 
-    // ── 2. Reactive transparency envelope driven by key press, long press, chord mass & poly touch
+    // 2. Reactive transparency envelope driven by key press, long press, chord mass & poly touch
     float pressAct = clamp (pulse * 0.95, 0.0, 1.0);
     float holdAct  = clamp (hold * (0.85 + 0.25 * voices), 0.0, 1.0);
     float touchAct = clamp (polyTouch, 0.0, 1.0);
@@ -220,7 +220,7 @@ void main()
     // Subtle transparent reveal: faint phantom obsidian when idle (~0.04), smoothly rises to 0.26..0.54 when played
     float reveal = clamp (0.04 + 0.36 * smoothstep (0.0, 1.0, activity) + 0.14 * touchAct, 0.0, 0.54);
 
-    // ── 3. Tilted macro 3D perspective projection for obsidian ferrofluid
+    // 3. Tilted macro 3D perspective projection for obsidian ferrofluid
     float depth = mix (0.88, 2.75, pow (uv.y, 1.42));
     float dofSoft = smoothstep (0.46, 0.96, uv.y);
     vec2 p = vec2 ((uv.x - 0.5) * aspect * depth, depth * 1.15);
@@ -237,7 +237,7 @@ void main()
     float rippleDisp = sin (distFocal * 24.0 - pulseAge * 12.0) * shockRing * 1.35
                      + sin (distFocal * 32.0 - time * 6.5) * touchAct * 0.42 * exp (-distFocal * 1.35);
 
-    // ── 4. Layer 1: Glossy obsidian ferrofluid ribbons & neon-violet plasma crevices
+    // 4. Layer 1: Glossy obsidian ferrofluid ribbons & neon-violet plasma crevices
     float ft = time * 0.32;
     vec3 f0 = ferroField (p, ft, dofSoft, rippleDisp);
     float h = f0.x;
@@ -291,7 +291,7 @@ void main()
     ferroCol += mix (deepViolet, hotMagenta, 0.55) * bokeh * 0.44;
     ferroCol += deepViolet * (pocketMask * 0.08 * (0.30 + holdAct + touchAct));
 
-    // ── 5. Layer 2: Fine crystalline geometric neon-violet / electric-indigo plexus overlay
+    // 5. Layer 2: Fine crystalline geometric neon-violet / electric-indigo plexus overlay
     // Drifts in subtle parallax above the ferrofluid; sparks along the key-press shockwave,
     // widens on holds/chords, and shimmers crisply with jewel-like star-flares under poly touch.
     float plexusVis = clamp (0.015 + 0.18 * pressAct + 0.20 * holdAct + 0.34 * touchAct + 0.12 * voices, 0.0, 0.50);

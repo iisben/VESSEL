@@ -92,7 +92,7 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
-    // ── editor-facing API (undoManager declared before apvts for destruction order)
+    // editor-facing API (undoManager declared before apvts for destruction order)
     juce::UndoManager undoManager;
     juce::AudioProcessorValueTreeState apvts;
     Telemetry telemetry;
@@ -125,13 +125,13 @@ public:
     /** Bumped whenever a name changes, so the editor knows to repaint. */
     std::atomic<int> macroNamesVersion { 0 };
 
-    // ── XY Sculptor metadata & control
+    // XY Sculptor metadata & control
     juce::String xyLabelX() const;
     juce::String xyLabelY() const;
     void setXyLabels (const juce::String& xLabel, const juce::String& yLabel);
     void setXyPosition (float x01, float y01);
 
-    // ── Current preset metadata (V2 schema)
+    // Current preset metadata (V2 schema)
     juce::String currentPresetName() const;
     juce::String currentPresetAuthor() const;
     juce::String currentPresetCategory() const;
@@ -139,7 +139,7 @@ public:
     juce::String currentPresetDescription() const;
     bool currentPresetFavorite() const;
 
-    // ── A/B State Compare + Copy A->B (smooth click-free transition)
+    // A/B State Compare + Copy A->B (smooth click-free transition)
     int activeABSlot() const noexcept { return activeAB.load (std::memory_order_acquire); }
     void setActiveABSlot (int slot);
     void toggleAB() { setActiveABSlot (activeABSlot() == 0 ? 1 : 0); }
@@ -147,7 +147,7 @@ public:
     void copyBToA();
     std::atomic<int> abStateVersion { 0 };
 
-    // ── Undo / Redo (wired to APVTS parameter edits)
+    // Undo / Redo (wired to APVTS parameter edits)
     void beginUndoTransaction (const juce::String& actionName = {});
     void flushUndoState();
     bool undo();

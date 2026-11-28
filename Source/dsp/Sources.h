@@ -327,7 +327,7 @@ public:
 
         for (int i = 0; i < n; ++i)
         {
-            // ── loop capture logic
+            // loop capture logic
             if (p.freeze && ! frozenLatch) { engage (divSamples * 2); frozenLatch = true; }
             if (! p.freeze && frozenLatch) { frozenLatch = false; loopActive = false; }
 
@@ -350,7 +350,7 @@ public:
                 if (scan >= (double) loopLen) scan -= (double) loopLen;
             }
 
-            // ── grain scheduler
+            // grain scheduler
             spawnCounter -= 1.0f;
             if (spawnCounter <= 0.0f)
             {

@@ -18,7 +18,7 @@ enum class PType { Float, Bool, Choice };
 enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
 
 #define VESSEL_PARAMS(F) \
-    /* ── I · SOURCE ── Sub-harmonic generators (1) */ \
+    /* I · SOURCE - Sub-harmonic generators (1) */ \
     F (sub_on,        "Sub",            Bool,   0, 1, 1, 0, 0, None, "") \
     F (sub1_oct,      "Sub 1 Octave",   Choice, 0, 2, 1, 0, 1, None, "0|-1|-2") \
     F (sub2_oct,      "Sub 2 Octave",   Choice, 0, 2, 0, 0, 1, None, "-1|-2|-3") \
@@ -69,14 +69,14 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (gran_div,      "Stutter Div",    Choice, 0, 5, 2, 0, 1, None, "1/4|1/8|1/16|1/32|1/8T|1/16T") \
     F (gran_chance,   "Stutter Chance", Float,  0, 1, 0.0f, 0, 0, Pct, "") \
     F (gran_mix,      "Grain Mix",      Float,  0, 1, 0.5f, 0, 0, Pct, "") \
-    /* ── Voice ── */ \
+    /* Voice */ \
     F (voice_mode,    "Voice Mode",     Choice, 0, 2, 0, 0, 1, None, "Poly|Mono|Legato") \
     F (glide,         "Glide",          Float,  0, 2000, 0, 200, 0, Ms, "") \
     F (amp_a,         "Amp Attack",     Float,  0.5f, 10000, 5, 300, 0, Ms, "") \
     F (amp_d,         "Amp Decay",      Float,  1, 10000, 400, 500, 0, Ms, "") \
     F (amp_s,         "Amp Sustain",    Float,  0, 1, 0.8f, 0, 0, Pct, "") \
     F (amp_r,         "Amp Release",    Float,  5, 15000, 600, 800, 0, Ms, "") \
-    /* ── II · RUIN ── Pre/post distortion EQ (15) */ \
+    /* II · RUIN - Pre/post distortion EQ (15) */ \
     F (pre_tilt,      "Pre Tilt",       Float,  -12, 12, 0, 0, 0, Db, "") \
     F (pre_pivot,     "Pre Pivot",      Float,  100, 8000, 800, 800, 0, Hz, "") \
     F (post_tilt,     "Post Tilt",      Float,  -12, 12, 0, 0, 0, Db, "") \
@@ -112,7 +112,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (tape_mode,     "Tape Motor",     Choice, 0, 3, 0, 0, 1, None, "Off|Start|Stop|Start+Stop") \
     F (tape_start,    "Start Time",     Float,  20, 3000, 350, 400, 0, Ms, "") \
     F (tape_stop,     "Stop Time",      Float,  50, 6000, 900, 800, 0, Ms, "") \
-    /* ── III · SHAPE ── Dual ladder filters (11) */ \
+    /* III · SHAPE - Dual ladder filters (11) */ \
     F (flt_on,        "Ladders",        Bool,   0, 1, 1, 0, 0, None, "") \
     F (flt_route,     "Ladder Routing", Choice, 0, 2, 0, 0, 1, None, "Serial|Parallel|A Only") \
     F (flt_a_cut,     "Ladder A Cutoff",Float,  20, 20000, 1800, 1000, 0, Hz, "") \
@@ -146,7 +146,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (form_shift,    "Formant Shift",  Float,  -12, 12, 0, 0, 0, St, "") \
     F (form_res,      "Formant Res",    Float,  0, 1, 0.5f, 0, 0, Pct, "") \
     F (form_mix,      "Formant Mix",    Float,  0, 1, 0.6f, 0, 0, Pct, "") \
-    /* ── IV · SPACE ── Z-axis micro-delay (18) */ \
+    /* IV · SPACE - Z-axis micro-delay (18) */ \
     F (z_on,          "Z-Axis",         Bool,   0, 1, 1, 0, 0, None, "") \
     F (z_depth,       "Z Depth",        Float,  -1, 1, 0, 0, 0, Bip, "") \
     /* Impulse convolution (17) */ \
@@ -169,7 +169,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (haas_time,     "Haas Time",      Float,  0, 35, 12, 0, 0, Ms, "") \
     F (haas_width,    "Haas Width",     Float,  0, 1, 0.5f, 0, 0, Pct, "") \
     F (haas_xover,    "Haas Crossover", Float,  80, 1500, 300, 300, 0, Hz, "") \
-    /* ── V · PRESSURE ── Multiband up/down compression (21) */ \
+    /* V · PRESSURE - Multiband up/down compression (21) */ \
     F (ott_on,        "Multiband",      Bool,   0, 1, 0, 0, 0, None, "") \
     F (ott_depth,     "MB Depth",       Float,  0, 1, 0.4f, 0, 0, Pct, "") \
     F (ott_time,      "MB Time",        Float,  0.1f, 10, 1, 1, 0, X, "") \
@@ -200,7 +200,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (clip_ceiling,  "Ceiling",        Float,  -12, 0, -0.3f, 0, 0, Db, "") \
     F (out_gain,      "Output",         Float,  -24, 12, 0, 0, 0, Db, "") \
     F (in_level,      "Input",          Float,  0, 1, 0, 0, 0, Pct, "") \
-    /* ── MOD ── Warped LFOs (20) */ \
+    /* MOD - Warped LFOs (20) */ \
     F (lfo1_shape,    "LFO 1 Shape",    Choice, 0, 10, 0, 0, 1, None, "Sine|Triangle|Saw|Square|S&H|Glitch|Drawn|Ramp Down|Wander|Pump|Stairs") \
     F (lfo1_rate,     "LFO 1 Rate",     Float,  0.01f, 40, 0.5f, 1, 0, Hz, "") \
     F (lfo1_sync,     "LFO 1 Sync",     Bool,   0, 1, 0, 0, 0, None, "") \
@@ -228,7 +228,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (lfo3_amt1,     "LFO 3 Amt A",    Float,  -1, 1, 0, 0, 0, Bip, "") \
     F (lfo3_dest2,    "LFO 3 Dest B",   Choice, 0, 1, 0, 0, 1, None, "@dest") \
     F (lfo3_amt2,     "LFO 3 Amt B",    Float,  -1, 1, 0, 0, 0, Bip, "") \
-    /* ── EXPRESSION ── per-preset performance routing (no panel: set by presets, automatable from the host) */ \
+    /* EXPRESSION - per-preset performance routing (no panel: set by presets, automatable from the host) */ \
     F (vel_amp,       "Velocity to Amp",Float,  0, 1, 0.65f, 0, 0, Pct, "") \
     F (vel_dest1,     "Velocity Dest A",Choice, 0, 1, 0, 0, 1, None, "@dest") \
     F (vel_amt1,      "Velocity Amt A", Float,  -1, 1, 0, 0, 0, Bip, "") \
@@ -242,7 +242,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (at_amt1,       "Aftertouch Amt A",Float, -1, 1, 0, 0, 0, Bip, "") \
     F (at_dest2,      "Aftertouch Dest B",Choice,0, 1, 0, 0, 1, None, "@dest") \
     F (at_amt2,       "Aftertouch Amt B",Float, -1, 1, 0, 0, 0, Bip, "") \
-    /* ── VII · MOD (appended) ── LFO trigger, phase, fade, smoothing, polarity and routes C/D (20) */ \
+    /* VII · MOD (appended) - LFO trigger, phase, fade, smoothing, polarity and routes C/D (20) */ \
     F (lfo1_mode,     "LFO 1 Trigger",  Choice, 0, 2, 0, 0, 1, None, "Free|Retrig|One-shot") \
     F (lfo1_phase,    "LFO 1 Phase",    Float,  0, 1, 0, 0, 0, Pct, "") \
     F (lfo1_fade,     "LFO 1 Fade In",  Float,  0, 10, 0, 1, 0, Sec, "") \
@@ -270,7 +270,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (lfo3_amt3,     "LFO 3 Amt C",    Float,  -1, 1, 0, 0, 0, Bip, "") \
     F (lfo3_dest4,    "LFO 3 Dest D",   Choice, 0, 1, 0, 0, 1, None, "@dest") \
     F (lfo3_amt4,     "LFO 3 Amt D",    Float,  -1, 1, 0, 0, 0, Bip, "") \
-    /* ── IV · SHAPE (appended) ── Physical-model resonator (26) */ \
+    /* IV · SHAPE (appended) - Physical-model resonator (26) */ \
     F (res_on,        "Resonator",      Bool,   0, 1, 0, 0, 0, None, "") \
     F (res_model,     "Res Model",      Choice, 0, 7, 0, 0, 1, None, "String|Tube|Bell|Bar|Membrane|Plate|Bowl|Gong") \
     F (res_tune,      "Res Tune",       Float,  -24, 24, 0, 0, 0, St, "") \
@@ -282,7 +282,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (res_input,     "Res Input",      Float,  0, 1, 0.5f, 0, 0, Pct, "") \
     F (res_strike,    "Res Strike",     Float,  0, 1, 0.5f, 0, 0, Pct, "") \
     F (res_mix,       "Res Mix",        Float,  0, 1, 0.5f, 0, 0, Pct, "") \
-    /* ── I · SOURCE (appended) ── Wavetable library: 0 = the built-in table, then the imported ones */ \
+    /* I · SOURCE (appended) - Wavetable library: 0 = the built-in table, then the imported ones */ \
     F (wt_table,      "WT Table",       Choice, 0, dsp::kNumTables, 0, 0, 1, None, "@tables") \
     /* FM operator (27): a sine modulator phase-modulating the wavetable oscillator */ \
     F (fm_on,         "FM",             Bool,   0, 1, 0, 0, 0, None, "") \
@@ -293,7 +293,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (fm_env,        "FM Env",         Float,  0, 1, 0, 0, 0, Pct, "") \
     F (fm_decay,      "FM Decay",       Float,  0.005f, 8, 0.4f, 0.5f, 0, Sec, "") \
     F (fm_key,        "FM Key Track",   Float,  0, 1, 0, 0, 0, Pct, "") \
-    /* ── MACROS (appended) ── eight named performance macros, six routes each (amount × macro, like expression) */ \
+    /* MACROS (appended) - eight named performance macros, six routes each (amount × macro, like expression) */ \
     F (macro1,        "Macro 1",        Float,  0, 1, 0, 0, 0, Pct, "") \
     F (macro2,        "Macro 2",        Float,  0, 1, 0, 0, 0, Pct, "") \
     F (macro3,        "Macro 3",        Float,  0, 1, 0, 0, 0, Pct, "") \
@@ -398,7 +398,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (mac8_amt5,     "Macro 8 Amt E",  Float,  -1, 1, 0, 0, 0, Bip, "") \
     F (mac8_dest6,    "Macro 8 Dest F", Choice, 0, 1, 0, 0, 1, None, "@dest") \
     F (mac8_amt6,     "Macro 8 Amt F",  Float,  -1, 1, 0, 0, 0, Bip, "") \
-    /* ── V2 Dark Analog Organic Layer & Procedural Texture Bus (append-only, 0% default) ── */ \
+    /* Organic bus & procedural texture layer (append-only, 0% default) */ \
     F (v2_organic_amt,   "Organic Drift",  Float,  0, 1, 0.0f,  0, 0, Pct, "") \
     F (v2_organic_floor, "Thermal Floor",  Float,  0, 1, 0.0f,  0, 0, Pct, "") \
     F (v2_organic_mono,  "Sub-120 Anchor", Bool,   0, 1, 0,     0, 0, None, "") \
@@ -406,7 +406,7 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (v2_tex_mix,       "Texture Mix",    Float,  0, 1, 0.0f,  0, 0, Pct, "") \
     F (v2_tex_tone,      "Texture Tone",   Float,  0, 1, 0.5f,  0, 0, Pct, "") \
     F (v2_tex_drive,     "Texture Drive",  Float,  0, 1, 0.35f, 0, 0, Pct, "") \
-    /* ── V2 Control Plane: XY Sculptor, MPE, Velocity Curve, Slide & Breath (append-only, legacy-preserving defaults) ── */ \
+    /* XY pad, MPE, velocity curve, slide & breath (append-only) */ \
     F (v2_xy_x,          "XY X",           Float,  0, 1, 0.5f,  0, 0, Pct, "") \
     F (v2_xy_y,          "XY Y",           Float,  0, 1, 0.5f,  0, 0, Pct, "") \
     F (v2_xy_x_dest1,    "XY X Dest A",    Choice, 0, 1, 0,     0, 1, None, "@dest") \
@@ -429,19 +429,19 @@ enum class Unit  { None, Pct, Bip, Hz, Ms, Sec, Db, St, Ct, X, Vowel };
     F (v2_breath_amt1,   "Breath Amt A",   Float, -1, 1, 0.0f,  0, 0, Bip, "") \
     F (v2_breath_dest2,  "Breath Dest B",  Choice, 0, 1, 0,     0, 1, None, "@dest") \
     F (v2_breath_amt2,   "Breath Amt B",   Float, -1, 1, 0.0f,  0, 0, Bip, "") \
-    /* ── V2 Boutique Analog Realism: Vactrol LPG & Audio-Rate Feedback (append-only, Off/0% default) ── */ \
+    /* Vactrol LPG & audio-rate feedback (append-only, Off default) */ \
     F (v2_lpg_mode,      "Vactrol LPG",    Choice, 0, 3, 0,     0, 1, None, "Off|Both|LPF|VCA") \
     F (v2_lpg_decay,     "LPG Ring",       Float,  0, 1, 0.45f, 0, 0, Pct, "") \
     F (v2_lpg_strike,    "LPG Strike",     Float,  0, 1, 0.65f, 0, 0, Pct, "") \
     F (v2_fb_filter,     "Filter Feedback",Float, -1, 1, 0.0f,  0, 0, Bip, "") \
     F (v2_fb_fm,         "Filter to FM",   Float,  0, 1, 0.0f,  0, 0, Pct, "") \
-    /* ── V2 Boutique Analog Realism: Polyphonic Power-Rail Sag & Phase Dispersion (append-only, Off/0% default) ── */ \
+    /* Polyphonic power-rail sag & phase dispersion (append-only, Off default) */ \
     F (v2_rail_sag,      "Power Rail Sag", Float,  0, 1, 0.0f,    0, 0, Pct, "") \
     F (v2_rail_time,     "Rail Recovery",  Float, 20, 80, 45.0f, 45, 0, Ms,  "") \
     F (v2_disp_stages,   "Phase Disperse", Choice, 0, 5, 0,       0, 1, None, "Off|4 Stg|5 Stg|6 Stg|7 Stg|8 Stg") \
     F (v2_disp_freq,     "Disperse Freq",  Float, 40, 2000, 180.0f, 220, 0, Hz, "") \
     F (v2_disp_pinch,    "Disperse Pinch", Float,  0, 1, 0.50f,   0, 0, Pct, "") \
-    /* ── V2 Boutique Analog Realism: BBD Analog Chorus (append-only, Off default) ── */ \
+    /* BBD analog chorus (append-only, Off default) */ \
     F (v2_bbd_mode,      "BBD Chorus",     Choice, 0, 3, 0,       0, 1, None, "Off|Mode I|Mode II|Ensemble") \
     F (v2_bbd_rate,      "BBD Rate",       Float,  0.05f, 8.0f, 0.55f, 0.8f, 0, Hz, "") \
     F (v2_bbd_depth,     "BBD Depth",      Float,  0, 1, 0.55f,   0, 0, Pct, "") \
@@ -506,7 +506,7 @@ inline bool isMacroParam (int pid) noexcept     { return pid >= macro1 && pid <=
 inline bool isV2DspParam (int pid) noexcept     { return pid >= v2_organic_amt && pid <= v2_tex_drive; }
 inline bool isV2ControlParam (int pid) noexcept { return pid >= v2_xy_x && pid <= v2_breath_amt2; }
 
-/** Hero Macros (first 4 of the 8 performance macros, NAMM performance dock workhorses). */
+/** First 4 of the 8 performance macros (pinned to the main performance dock). */
 constexpr int kHeroMacros = 4;
 constexpr int kXySlots = 2;
 constexpr int xyDestPid (int axis, int slot) noexcept { return (axis == 0 ? v2_xy_x_dest1 : v2_xy_y_dest1) + slot * 2; }

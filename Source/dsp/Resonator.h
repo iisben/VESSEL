@@ -82,7 +82,7 @@ public:
         sustain = false; wasOn = true;
     }
 
-    // ── keyboard (audio thread, from the MIDI handler)
+    // keyboard (audio thread, from the MIDI handler)
     void noteOn (int note, float vel)
     {
         if (note < 0 || note >= 128) return;
@@ -151,7 +151,7 @@ public:
     void monoRelease() { for (auto& s : slots) s.held = s.sustained = false; }
     void allOff()      { for (auto& s : slots) { s.held = s.sustained = false; s.pending = -1; } }
 
-    // ── audio
+    // audio
     /** In place on the stereo bus. Called every chunk; with p.on == false it only lets released strings go. */
     void process (float* l, float* r, int n, const Params& p)
     {

@@ -920,7 +920,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     if (const int t = pc (wt_table); t != tableAsked) { tables.request (t); tableAsked = t; }   // lock-free; loads in the background
     voices.setTable (tables.acquireAudio());
 
-    // ── (1)(5)(11) voices oversampled in one kChunk<=64 batch, with inner kControlStep=8 fixed-grid modulation
+    // (1)(5)(11) voices oversampled in one kChunk<=64 batch, with inner kControlStep=8 fixed-grid modulation
     const bool anyVoiceStart = voices.anyActive();
     if (anyVoiceStart) { voiceOsIdle = false; bodyQuietSamples = 0; }
     const bool runVoiceOs = ! voiceOsIdle;
@@ -1083,32 +1083,32 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
 
     for (int i = 0; i < n; ++i) key[(size_t) i] = 0.5f * (bodyL[(size_t) i] + bodyR[(size_t) i]) + subB[(size_t) i];
 
-    // ── (3) drone
+    // (3) drone
     DroneEngine::Params dp;
     dp.on = pb (drone_on); dp.hold = pb (drone_hold); dp.level = pvBus (drone_level); dp.tone = pvBus (drone_tone);
     dp.motion = pvBus (drone_motion); dp.spread = pvBus (drone_spread); dp.attack = pvBus (drone_attack); dp.release = pvBus (drone_release);
     dp.octave = (pc (drone_oct) - 2) * 12;
     drone.process (texL.data(), texR.data(), n, voices.lowestHeld(), dp, isBusTick, busSpan);
 
-    // ── (4) noise injector
+    // (4) noise injector
     NoiseInjector::Params np;
     np.on = pb (noise_on); np.hiss = pvBus (noise_hiss); np.crackle = pvBus (noise_crackle); np.hum = pvBus (noise_hum);
     np.tone = pvBus (noise_tone); np.dyn = pvBus (noise_dyn); np.mains = pc (noise_hum_freq) == 0 ? 50.0f : 60.0f;
     noise.process (texL.data(), texR.data(), key.data(), n, np, isBusTick, busSpan);
 
-    // ── V2 procedural texture & sub-harmonic layer (0% default mix, 0 latency, 100% procedural)
+    // Procedural texture & sub-harmonic layer (0% default mix, 0 latency)
     {
         ProceduralTextureBus::Params texp { pc (v2_tex_mode), pvBus (v2_tex_mix), pvBus (v2_tex_tone), pvBus (v2_tex_drive) };
         textureBus.process (texL.data(), texR.data(), key.data(), n, busVoiceActive, busLowestHeld, texp, isBusTick, busSpan);
     }
 
-    // ── (23) ducker: sub punches through the texture layer
+    // (23) ducker: sub punches through the texture layer
     ducker.process (texL.data(), texR.data(), subB.data(), n, pb (duck_on), pc (duck_mode), pvBus (duck_depth), pvBus (duck_release), isBusTick, busSpan);
 
     // pre-bus = body + texture
     for (int i = 0; i < n; ++i) { xL[(size_t) i] = bodyL[(size_t) i] + texL[(size_t) i]; xR[(size_t) i] = bodyR[(size_t) i] + texR[(size_t) i]; }
 
-    // ── (2) granular micro-looper
+    // (2) granular micro-looper
     {
         static constexpr float divs[] { 1.0f, 0.5f, 0.25f, 0.125f, 1.0f / 3.0f, 1.0f / 6.0f };
         GranularLooper::Params gp;
@@ -1118,13 +1118,13 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         faded (fGran, pb (gran_on), n, [&] (bool on) { gp.on = on; granular.process (xL.data(), xR.data(), n, gp, isBusTick, busSpan); });
     }
 
-    // ── (13) spectral unmasking keyed by the sub
+    // (13) spectral unmasking keyed by the sub
     {
         Unmasker::Params up { true, pvBus (unmask_freq), pvBus (unmask_depth), pvBus (unmask_release) };
         faded (fUnmask, pb (unmask_on), n, [&] (bool on) { up.on = on; unmask.process (xL.data(), xR.data(), subB.data(), n, up, isBusTick); });
     }
 
-    // ── (26) physical-model resonator: before RUIN, so the tube can drive it and the clean sub stays outside it
+    // (26) physical-model resonator: before RUIN, so the tube can drive it and the clean sub stays outside it
     {
         Resonator::Params rsp;
         rsp.model = pc (res_model); rsp.tune = pvBus (res_tune); rsp.decay = pvBus (res_decay); rsp.bright = pvBus (res_bright);
@@ -1134,7 +1134,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         faded (fRes, pb (res_on), n, [&] (bool on) { rsp.on = on; resonator.process (xL.data(), xR.data(), n, rsp); });
     }
 
-    // ── RUIN: sub send → (15) pre tilt → [4x: (6) tube → (15) post tilt → (10) bias] → (9) crush
+    // RUIN: sub send → (15) pre tilt → [4x: (6) tube → (15) post tilt → (10) bias] → (9) crush
     if (isBusTick)
     {
         const float ss = pvBus (sub_send);
@@ -1176,7 +1176,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     telemetry.subLevel.store (flushDenormal (std::max (subLevelNow, telemetry.subLevel.load (std::memory_order_relaxed) * subDecay)),
                               std::memory_order_relaxed);
 
-    // ── Zero-gain-change 4-to-8-stage 64-bit TPT all-pass phase dispersion (post-sub-rejoin, sub-120 Hz mono-correlated)
+    // 4-to-8-stage 64-bit TPT all-pass phase dispersion (post-sub-rejoin, sub-120 Hz mono-correlated)
     {
         const int dispChoice = pc (v2_disp_stages);   // 0=Off, 1..5 -> 4..8 stages
         PhaseDisperser::Params dpp { true, dispChoice > 0 ? (dispChoice + 3) : disperser.activeStages(),
@@ -1184,7 +1184,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         faded (fDisp, dispChoice > 0, n, [&] (bool on) { dpp.on = on; disperser.process (xL.data(), xR.data(), n, dpp, isBusTick, busSpan); });
     }
 
-    // ── (7) VHS → (8) tape motor
+    // (7) VHS → (8) tape motor
     {
         VhsTransport::Params vhp { true, pvBus (vhs_wow), pvBus (vhs_flutter), pvBus (vhs_drift), pvBus (vhs_rate), pvBus (vhs_age) };
         faded (fVhs, pb (vhs_on), n, [&] (bool on) { vhp.on = on; vhs.process (xL.data(), xR.data(), n, vhp, isBusTick, busSpan); });
@@ -1192,7 +1192,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     TapeMotor::Params tmp { (TapeMotor::Mode) pc (tape_mode), pvBus (tape_start), pvBus (tape_stop) };
     tape.process (xL.data(), xR.data(), n, tmp);
 
-    // ── SHAPE (global): (12) follower LPF → (14) formant
+    // SHAPE (global): (12) follower LPF → (14) formant
     {
         FollowerFilter::Params fp { true, pvBus (envf_cut), pvBus (envf_depth), pvBus (envf_res), pvBus (envf_attack), pvBus (envf_release), pvBus (envf_mix) };
         faded (fFollow, pb (envf_on), n, [&] (bool on) { fp.on = on; follower.process (xL.data(), xR.data(), n, fp, isBusTick, busSpan); });
@@ -1200,7 +1200,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
         faded (fFormant, pb (form_on), n, [&] (bool on) { ffp.on = on; formant.process (xL.data(), xR.data(), n, ffp, isBusTick, busSpan); });
     }
 
-    // ── SPACE: (18) Z-axis → BBD Analog Chorus → (17) convolution → (16) black hole → (19) Haas
+    // SPACE: (18) Z-axis → BBD Analog Chorus → (17) convolution → (16) black hole → (19) Haas
     zaxis.process (xL.data(), xR.data(), n, pb (z_on), pvBus (z_depth));
 
     {
@@ -1238,7 +1238,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
 
     haas.process (xL.data(), xR.data(), n, pb (haas_on), pvBus (haas_time), pvBus (haas_width), pvBus (haas_xover));
 
-    // ── PRESSURE: (21) multiband → (22) mono collapse → V2 Organic Bus → [4x: (24) exciter → output gain → (25) clipper]
+    // PRESSURE: (21) multiband → (22) mono collapse → V2 Organic Bus → [4x: (24) exciter → output gain → (25) clipper]
     {
         MultibandOtt::Params op;
         op.depth = pvBus (ott_depth); op.time = pvBus (ott_time); op.up = pvBus (ott_up); op.down = pvBus (ott_down);
@@ -1257,7 +1257,7 @@ void VesselProcessor::renderChunk (juce::AudioBuffer<float>& io, int start, int 
     OutputStage::Params osp { pb (exc_on), pvBus (exc_freq), pvBus (exc_amount), pvBus (exc_harm), pb (clip_on), pvBus (clip_ceiling), pvBus (out_gain) };
     outStage.process (xL.data(), xR.data(), n, osp, isBusTick, busSpan);
 
-    // ── sanitize output + write out + telemetry
+    // sanitize output + write out + telemetry
     for (int i = 0; i < n; ++i)
     {
         if (! std::isfinite (xL[(size_t) i])) xL[(size_t) i] = 0.0f;
